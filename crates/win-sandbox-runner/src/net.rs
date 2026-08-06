@@ -138,6 +138,17 @@ pub fn find_dll_path() -> Option<PathBuf> {
     None
 }
 
+/// Detect and bind-mount /dev/ntsync if present (Wine 9+ NTsync support).
+pub fn bind_ntsync(cmd: &mut Command) {
+    let ntsync_path = "/dev/ntsync";
+    if Path::new(ntsync_path).exists() {
+        cmd.args(["--dev-bind", ntsync_path, ntsync_path]);
+        info!("NTsync: bind-mounted /dev/ntsync (Wine 9+ synchronization)");
+    } else {
+        debug!("NTsync: /dev/ntsync not present (kernel too old or not enabled)");
+    }
+}
+
 /// Configure networking for a bubblewrap command.
 ///
 /// When `network` is true:
@@ -159,6 +170,16 @@ pub fn configure_bwrap_networking(
 
         // Bind-mount the Unix socket into the container
         cmd.args(["--bind", &socket_str, &socket_str]);
+
+        // DNS resolution: bind-mount /etc/resolv.conf so the sandbox can resolve names
+        // Must come AFTER the --ro-bind /etc or it gets shadowed
+        let resolv_conf = "/etc/resolv.conf";
+        if Path::new(resolv_conf).exists() {
+            cmd.args(["--ro-bind", resolv_conf, resolv_conf]);
+            debug!("DNS: bind-mounted {}", resolv_conf);
+        } else {
+            warn!("{} not found — DNS resolution will fail in sandbox", resolv_conf);
+        }
 
         // Set WINEDLLPATH so Wine can find sys_netmp.dll
         if let Some(dll_dir) = find_dll_path() {
@@ -234,5 +255,21 @@ mod tests {
     fn find_dll_path_returns_none_when_missing() {
         // In test environment, the DLL may or may not exist
         let _ = find_dll_path();
+    }
+
+    #[test]
+    fn bind_ntsync_does_not_panic() {
+        // /dev/ntsync may or may not exist on this system
+        let mut cmd = Command::new("true");
+        bind_ntsync(&mut cmd);
+        // Verify it doesn't panic regardless
+    }
+
+    #[test]
+    fn configure_bwrap_networking_false_disables() {
+        let mut cmd = Command::new("true");
+        let config = crate::config::Config::default();
+        let result = configure_bwrap_networking(&mut cmd, false, &config);
+        assert!(result.is_ok());
     }
 }

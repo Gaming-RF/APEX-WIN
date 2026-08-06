@@ -17,7 +17,7 @@ mod tier3;
 use anyhow::Result;
 use clap::Parser;
 use std::process::ExitCode;
-use tracing::info;
+use tracing::{info, warn};
 
 /// win-sandbox-runner: Transparent tiered sandbox for Windows executables via Wine.
 #[derive(Parser, Debug)]
@@ -79,6 +79,11 @@ fn main() -> ExitCode {
 }
 
 fn run(args: &Args) -> Result<ExitCode> {
+    // Check Wine version before proceeding
+    if let Err(e) = check_wine_version() {
+        warn!("Wine version check failed: {e}");
+    }
+
     // Hash the binary
     let hash = hasher::hash_file(&args.exe)?;
     info!("Binary hash: {hash}");
@@ -89,4 +94,27 @@ fn run(args: &Args) -> Result<ExitCode> {
 
     // Dispatch to the appropriate tier
     dispatch::execute(args, &hash, &rules)
+}
+
+/// Check Wine version and warn if < 9.0.
+/// Wine 9.0+ adds NTsync, Wayland driver, and important fixes.
+fn check_wine_version() -> Result<()> {
+    use std::process::Command;
+    let output = Command::new("wine").arg("--version").output()?;
+    let version_str = String::from_utf8_lossy(&output.stdout);
+    let version_str = version_str.trim();
+    info!("Wine version: {version_str}");
+
+    // Parse "wine-X.Y.Z" or "wine-X.Y"
+    if let Some(ver) = version_str.strip_prefix("wine-") {
+        let major: u32 = ver.split('.').next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        if major < 9 {
+            warn!("Wine {ver} detected — Wine 9.0+ recommended");
+            warn!("Older Wine may lack NTsync, Wayland driver, and important fixes");
+        }
+    }
+
+    Ok(())
 }

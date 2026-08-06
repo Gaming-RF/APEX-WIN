@@ -86,6 +86,9 @@ pub fn run_with_network(args: &Args, network: bool) -> Result<ExitCode> {
     // GPU passthrough
     bind_gpu_devices(&mut cmd, nvidia.is_some(), amd_gpu.is_some());
 
+    // NTsync (Wine 9+ synchronization device)
+    crate::net::bind_ntsync(&mut cmd);
+
     // Audio socket
     if let Some(ref server) = audio {
         let socket_path = match server {
