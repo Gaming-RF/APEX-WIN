@@ -147,6 +147,7 @@ mod tests {
             host_x11: false,
             wayland: false,
             args: vec![],
+            trust: false,
         };
         let paths = build_ro_paths("/home/test/.wine", &args);
         assert!(paths.contains(&"/usr".to_string()));
@@ -170,6 +171,7 @@ mod tests {
             host_x11: false,
             wayland: false,
             args: vec![],
+            trust: false,
         };
         let paths = build_ro_paths("/tmp/.wine", &args);
         // "/" must NOT be in ro_paths (would grant read to entire root)

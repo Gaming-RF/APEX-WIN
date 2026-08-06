@@ -38,6 +38,24 @@ pub enum IpcMessage {
     Ping,
     /// Pong response.
     Pong,
+    /// Runner asks GUI to show a setup progress dialog.
+    SetupProgress {
+        /// App name being set up.
+        name: String,
+        /// Current step description (e.g. "Installing DXVK", "Installing dotnet48").
+        step: String,
+        /// Progress 0.0–1.0 (-1 = indeterminate).
+        progress: f64,
+    },
+    /// Runner tells GUI that setup is complete.
+    SetupComplete {
+        /// App name that was set up.
+        name: String,
+        /// Whether setup succeeded.
+        success: bool,
+        /// Summary message.
+        summary: String,
+    },
 }
 
 #[cfg(test)]

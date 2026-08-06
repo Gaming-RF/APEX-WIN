@@ -1,4 +1,5 @@
 mod amd;
+mod appdb;
 mod audio;
 mod cleanup;
 mod config;
@@ -14,6 +15,7 @@ mod tier0;
 mod tier1;
 mod tier2;
 mod tier3;
+mod wizard;
 
 use anyhow::Result;
 use clap::Parser;
@@ -72,6 +74,11 @@ struct Args {
     /// Additional arguments passed to the Windows executable.
     #[arg(trailing_var_arg = true)]
     args: Vec<String>,
+
+    /// Mark this app as trusted (no sandboxing) and save to rules.json.
+    /// On next launch, the app will run without sandboxing automatically.
+    #[arg(long)]
+    trust: bool,
 }
 
 fn main() -> ExitCode {
@@ -114,8 +121,16 @@ fn run(args: &Args) -> Result<ExitCode> {
     let rules_path = config::find_rules_path(args.rules.as_deref());
     let rules = rules::load_rules(rules_path.as_deref())?;
 
+    // Load the built-in app database
+    let app_db = appdb::AppDatabase::load_embedded();
+
+    // --trust flag: save this app as trusted in rules.json
+    if args.trust {
+        save_trusted_rule(&args.exe, &hash)?;
+    }
+
     // Dispatch to the appropriate tier
-    dispatch::execute(args, &hash, &rules)
+    dispatch::execute(args, &hash, &rules, &app_db)
 }
 
 /// Check Wine version and warn if < 9.0.
@@ -137,6 +152,66 @@ fn check_wine_version() -> Result<()> {
             warn!("Older Wine may lack NTsync, Wayland driver, and important fixes");
         }
     }
+
+    Ok(())
+}
+
+/// Save a trusted rule for the given exe into rules.json.
+/// If the hash already exists, updates it. Otherwise, adds a new entry.
+fn save_trusted_rule(exe_path: &str, hash: &str) -> Result<()> {
+    use win_sandbox_common::rules_schema::{RuleEntry, RulesFile};
+
+    let name = std::path::Path::new(exe_path)
+        .file_stem()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    let rules_path = config::find_rules_path(None)
+        .unwrap_or_else(|| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+            std::path::PathBuf::from(format!("{home}/.config/win-sandbox/rules.json"))
+        });
+
+    // Load existing rules or create defaults
+    let mut rules = rules::load_rules(Some(&rules_path)).unwrap_or(RulesFile {
+        version: 1,
+        entries: vec![],
+        defaults: Default::default(),
+    });
+
+    // Check if entry already exists
+    let existing = rules.entries.iter().position(|e| e.hash == hash);
+    let entry = RuleEntry {
+        hash: hash.to_string(),
+        name: name.clone(),
+        tier: win_sandbox_common::tier::Tier::Tier0,
+        allowed_paths: vec![],
+        network: true,
+        gpu: true,
+        trusted: true,
+        dxvk: false,
+        winetricks: vec![],
+        env: std::collections::HashMap::new(),
+        wine_variant: "system".into(),
+    };
+
+    if let Some(pos) = existing {
+        rules.entries[pos] = entry;
+        info!("Updated trusted rule for '{name}' in rules.json");
+    } else {
+        rules.entries.push(entry);
+        info!("Saved trusted rule for '{name}' to rules.json");
+    }
+
+    // Ensure parent directory exists
+    if let Some(parent) = rules_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let json = serde_json::to_string_pretty(&rules)?;
+    std::fs::write(&rules_path, json)?;
+    info!("Rules saved to {}", rules_path.display());
 
     Ok(())
 }

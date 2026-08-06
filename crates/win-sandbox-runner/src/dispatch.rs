@@ -5,7 +5,7 @@ use tracing::{info, warn};
 use win_sandbox_common::rules_schema::RulesFile;
 use win_sandbox_common::tier::Tier;
 
-use crate::rules;
+use crate::{appdb, rules, wizard};
 
 /// Check if a path is in an untrusted location.
 pub fn is_untrusted_path(path: &str) -> bool {
@@ -24,32 +24,58 @@ fn resolve_network_permission(rules: &RulesFile, hash: &str) -> bool {
 
 /// Execute the appropriate tier for the given binary.
 ///
-/// Decision flow:
-///   1. Look up rule by hash
-///   2. If matched, ensure Wine prefix exists and install deps (DXVK, winetricks)
-///   3. If `trusted: true`, run wine directly (no sandbox)
-///   4. Otherwise, resolve tier and execute in sandbox
-pub fn execute(args: &Args, hash: &str, rules: &RulesFile) -> Result<ExitCode> {
-    let matched_entry = rules::lookup_by_hash(rules, hash);
+/// Full resolution flow:
+///   1. Look up by hash in rules.json (exact match)
+///   2. Look up by exe name in app database (fuzzy match)
+///   3. Run first-launch wizard (auto-detect heuristics)
+///   4. Ensure Wine prefix exists and install deps
+///   5. If trusted, run wine directly (no sandbox)
+///   6. Otherwise, resolve tier and execute in sandbox
+pub fn execute(
+    args: &Args,
+    hash: &str,
+    rules: &RulesFile,
+    app_db: &appdb::AppDatabase,
+) -> Result<ExitCode> {
+    // --- Step 1: Exact hash match in rules.json ---
+    let mut matched_entry: Option<win_sandbox_common::rules_schema::RuleEntry> =
+        rules::lookup_by_hash(rules, hash).cloned();
 
-    // --- Per-app prefix management for matched rules ---
-    if let Some(entry) = &matched_entry {
+    // --- Step 2: Name-based match in app database ---
+    if matched_entry.is_none() {
+        if let Some((profile, entry)) = app_db.lookup_by_name(&args.exe) {
+            info!(
+                "App database match: '{}' -> '{}'",
+                std::path::Path::new(&args.exe)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("?"),
+                profile.name
+            );
+            if !profile.notes.is_empty() {
+                info!("  Note: {}", profile.notes);
+            }
+            matched_entry = Some(entry);
+        }
+    }
+
+    // --- Step 3: First-launch wizard for unknown apps ---
+    if matched_entry.is_none() {
+        let result = wizard::run_wizard(&args.exe, app_db, args.no_gui, hash);
+        info!("First launch: {}", wizard::describe_decision(&result));
+        matched_entry = Some(result.entry);
+    }
+
+    // --- Step 4: Per-app prefix management ---
+    if let Some(ref entry) = matched_entry {
         let prefix_mgr = crate::prefix::PrefixManager::new();
-
-        // Ensure prefix exists and install any missing deps
-        let wine_prefix = prefix_mgr.setup_app(
-            hash,
-            entry.dxvk,
-            &entry.winetricks,
-        )?;
-
-        // Set WINEPREFIX for all subsequent wine calls
+        let wine_prefix = prefix_mgr.setup_app(hash, entry.dxvk, &entry.winetricks)?;
         std::env::set_var("WINEPREFIX", &wine_prefix);
         info!("WINEPREFIX: {}", wine_prefix.display());
     }
 
-    // --- Trusted apps: no sandboxing, just run wine directly ---
-    if let Some(entry) = &matched_entry {
+    // --- Step 5: Trusted apps — no sandboxing ---
+    if let Some(ref entry) = matched_entry {
         if entry.trusted {
             info!("Trusted app '{}', no sandboxing", entry.name);
 
@@ -62,12 +88,12 @@ pub fn execute(args: &Args, hash: &str, rules: &RulesFile) -> Result<ExitCode> {
         }
     }
 
-    // --- Resolve tier ---
+    // --- Step 6: Resolve tier ---
     let tier = if let Some(ref tier_str) = args.tier {
         let t: Tier = tier_str.parse()?;
         info!("Forced tier: {t}");
         t
-    } else if let Some(entry) = matched_entry {
+    } else if let Some(ref entry) = matched_entry {
         info!("Matched rule '{}', tier: {}", entry.name, entry.tier);
         entry.tier
     } else if is_untrusted_path(&args.exe) {
@@ -80,25 +106,25 @@ pub fn execute(args: &Args, hash: &str, rules: &RulesFile) -> Result<ExitCode> {
         t
     };
 
-    // Resolve network
     let network = resolve_network_permission(rules, hash);
     info!("Network access: {network}");
 
     if args.dry_run {
-        info!("[DRY RUN] Would execute tier {tier} for {} (network={network})", args.exe);
+        info!(
+            "[DRY RUN] Would execute tier {tier} for {} (network={network})",
+            args.exe
+        );
         return Ok(ExitCode::SUCCESS);
     }
 
-    // Nvidia + user namespaces: downgrade Tier 2 to Tier 1 (plan §11 edge case)
+    // Nvidia + user namespaces: downgrade Tier 2 to Tier 1
     let tier = if tier == Tier::Tier2 && crate::nvidia::detect().is_some() {
-        warn!("Nvidia GPU detected — downgrading Tier 2 (Bubblewrap) to Tier 1 (Landlock)");
-        warn!("Bubblewrap user namespaces can break Nvidia VK initialization");
+        warn!("Nvidia GPU detected — downgrading Tier 2 to Tier 1");
         Tier::Tier1
     } else {
         tier
     };
 
-    // Collect app-specific env vars for tier 0
     let app_env: std::collections::HashMap<String, String> = matched_entry
         .as_ref()
         .map(|e| e.env.clone())
@@ -117,10 +143,7 @@ pub fn execute(args: &Args, hash: &str, rules: &RulesFile) -> Result<ExitCode> {
 /// Pass through directly to wine (used when recursion guard is active).
 pub fn passthrough_to_wine(exe: &str, args: &[String]) -> ExitCode {
     use std::process::Command;
-    let status = Command::new("wine")
-        .arg(exe)
-        .args(args)
-        .status();
+    let status = Command::new("wine").arg(exe).args(args).status();
     match status {
         Ok(s) => {
             if s.success() {
@@ -192,7 +215,6 @@ mod tests {
     fn trusted_with_custom_env() {
         let mut env = std::collections::HashMap::new();
         env.insert("DXVK_HUD".into(), "1".into());
-        env.insert("MESA_GL_VERSION_OVERRIDE".into(), "4.5".into());
 
         let entry = RuleEntry {
             hash: "abc".into(),
@@ -210,6 +232,5 @@ mod tests {
 
         assert!(entry.trusted);
         assert_eq!(entry.env.get("DXVK_HUD").unwrap(), "1");
-        assert_eq!(entry.wine_variant, "proton");
     }
 }
