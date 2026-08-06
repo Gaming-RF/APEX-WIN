@@ -6,6 +6,9 @@ use tracing::{debug, error, info};
 /// The signal handler writes a byte here; the main loop reads it.
 static mut CLEANUP_PIPE_FD: Option<(RawFd, RawFd)> = None;
 
+/// Static mount path for atexit cleanup callback.
+static mut CLEANUP_MOUNT_PATH: Option<&'static str> = None;
+
 /// Initialize the self-pipe trick for async-signal-safe SIGCHLD handling.
 ///
 /// Returns the read end of the pipe, which should be polled in the main loop.
@@ -62,25 +65,32 @@ pub fn install_sigchld_handler() -> Result<()> {
 
 /// Install atexit handler and panic hook for overlay cleanup.
 pub fn install_cleanup_hooks(mount_path: String) {
-    // Register atexit handler
+    // Leak the string so the static reference lives forever.
+    // This is intentional — the process exits after wine finishes.
+    let static_path: &'static str = Box::leak(mount_path.into_boxed_str());
+
     unsafe {
+        CLEANUP_MOUNT_PATH = Some(static_path);
         libc::atexit(cleanup_atexit);
     }
 
     // Register panic hook
-    let path = mount_path.clone();
+    let path = static_path.to_string();
     std::panic::set_hook(Box::new(move |_info| {
         error!("Panic occurred, cleaning up overlay mount");
         cleanup_overlay(&path);
     }));
 
-    debug!("Cleanup hooks installed for: {mount_path}");
+    debug!("Cleanup hooks installed for: {static_path}");
 }
 
-/// atexit callback — cannot take arguments, uses static mount path.
+/// atexit callback — reads mount path from static and unmounts.
 extern "C" fn cleanup_atexit() {
-    // TODO: Store mount path in a static and unmount
-    debug!("atexit cleanup triggered");
+    unsafe {
+        if let Some(path) = CLEANUP_MOUNT_PATH {
+            cleanup_overlay(path);
+        }
+    }
 }
 
 /// Attempt to unmount and remove an OverlayFS mount.

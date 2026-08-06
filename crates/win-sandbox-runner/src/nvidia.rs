@@ -43,9 +43,32 @@ pub fn detect() -> Option<NvidiaInfo> {
 
     Some(NvidiaInfo {
         devices,
-        libs: vec![], // TODO: detect lib paths
+        libs: detect_nvidia_libs(),
         smi_path,
     })
+}
+
+/// Detect Nvidia shared library paths in standard locations.
+fn detect_nvidia_libs() -> Vec<String> {
+    let lib_dirs = [
+        "/usr/lib/x86_64-linux-gnu",
+        "/usr/lib64",
+        "/usr/lib",
+    ];
+
+    let mut libs = Vec::new();
+    for dir in &lib_dirs {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.starts_with("libnvidia") || name_str.starts_with("libcuda") {
+                    libs.push(entry.path().to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+    libs
 }
 
 /// Check if a command exists in PATH.

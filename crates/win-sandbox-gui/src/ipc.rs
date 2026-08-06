@@ -162,21 +162,23 @@ pub fn send_request(socket_path: &str, msg: &IpcMessage) -> Result<IpcMessage> {
 /// zbus object server pattern which is more complex.
 /// For now, Unix socket is the working transport.
 pub fn start_dbus_listener() -> Result<mpsc::Receiver<IpcRequest>> {
-    // TODO: Full D-Bus object server with zbus
-    // This requires implementing an ObjectManager or Interface
-    // with method calls for ConfirmRequest and TrustRequest.
-    // For Phase 5, we use Unix socket as the primary transport.
+    // D-Bus object server integration with zbus requires implementing the
+    // org.wine.SandboxRunner Interface with method calls for ConfirmRequest
+    // and TrustRequest. The Unix socket transport works as the primary
+    // transport for now. D-Bus can be added when there's demand for desktop
+    // integration (e.g., GNOME notification bubbles for sandbox requests).
     warn!("D-Bus IPC not yet implemented, using Unix socket fallback");
     start_unix_listener(DEFAULT_SOCKET_PATH)
 }
 
 /// Resolve which IPC transport to use.
+/// Currently always returns UnixSocket; D-Bus will be used when
+/// the zbus object server is implemented.
 pub fn resolve_transport() -> IpcTransport {
-    // Check if D-Bus session bus is available
+    // D-Bus session bus availability doesn't matter until we implement
+    // the zbus Interface. For now, Unix socket is the working transport.
     if std::env::var("DBUS_SESSION_BUS_ADDRESS").is_ok() {
-        // TODO: Actually use D-Bus when implemented
-        // For now, prefer Unix socket even on desktop
-        debug!("D-Bus available but using Unix socket (not yet implemented)");
+        debug!("D-Bus available — will be used when zbus integration is complete");
     }
 
     IpcTransport::UnixSocket {

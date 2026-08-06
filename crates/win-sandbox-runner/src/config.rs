@@ -100,7 +100,9 @@ pub fn load_config(override_path: Option<&str>) -> Config {
 
     if let Some(path) = config_path {
         debug!("Loading config from: {}", path.display());
-        // TODO: Parse INI format
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            parse_ini_config(&contents, &mut config);
+        }
     }
 
     // Environment variable overrides
@@ -119,6 +121,70 @@ fn expand_tilde(path: &str) -> PathBuf {
         }
     }
     PathBuf::from(path)
+}
+
+/// Parse a simple INI-format config file into a Config struct.
+///
+/// Supports `[section]` headers and `key = value` pairs.
+/// Comments start with `#` or `;`.
+fn parse_ini_config(contents: &str, config: &mut Config) {
+    let mut _section = String::new();
+
+    for line in contents.lines() {
+        let line = line.trim();
+
+        // Skip empty lines and comments
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+
+        // Section header
+        if line.starts_with('[') && line.ends_with(']') {
+            _section = line[1..line.len() - 1].to_string();
+            continue;
+        }
+
+        // Key = value
+        if let Some((key, value)) = line.split_once('=') {
+            let key = key.trim();
+            let value = value.trim();
+
+            match key {
+                "prefix" => config.wine_prefix = value.to_string(),
+                "rules_path" => config.rules_path = Some(PathBuf::from(value)),
+                "gui_enabled" => config.gui_enabled = parse_bool(value),
+                "default_tier" => {
+                    if let Ok(t) = value.parse() {
+                        config.default_tier = t;
+                    }
+                }
+                "display_mode" => {
+                    config.display_mode = match value {
+                        "host-x11" => DisplayMode::HostX11,
+                        "nested-x11" => DisplayMode::NestedX11,
+                        "xvfb" => DisplayMode::Xvfb,
+                        "wayland" => DisplayMode::Wayland,
+                        _ => DisplayMode::NestedX11,
+                    };
+                }
+                "level" if _section == "logging" => {
+                    config.log_level = value.to_string();
+                }
+                "tap_bridge_socket" => {
+                    config.tap_bridge_socket = value.to_string();
+                }
+                "tap_device" => config.tap_device = value.to_string(),
+                _ => {
+                    debug!("Unknown config key: [{_section}] {key}");
+                }
+            }
+        }
+    }
+}
+
+/// Parse a boolean string ("true", "1", "yes", "on" vs "false", "0", "no", "off").
+fn parse_bool(s: &str) -> bool {
+    matches!(s.to_lowercase().as_str(), "true" | "1" | "yes" | "on")
 }
 
 #[cfg(test)]
@@ -149,5 +215,63 @@ mod tests {
         let result = find_rules_path(None);
         // We just check it doesn't panic
         let _ = result;
+    }
+
+    #[test]
+    fn parse_ini_full_config() {
+        let ini = "\
+[wine]
+prefix = /home/test/.wine-test
+
+[sandbox]
+rules_path = /etc/test/rules.json
+gui_enabled = false
+default_tier = 2
+display_mode = wayland
+
+[logging]
+level = debug
+
+[network]
+tap_bridge_socket = /var/run/test.sock
+tap_device = test-tap0
+";
+        let mut config = Config::default();
+        parse_ini_config(ini, &mut config);
+        assert_eq!(config.wine_prefix, "/home/test/.wine-test");
+        assert_eq!(config.rules_path.unwrap().to_str().unwrap(), "/etc/test/rules.json");
+        assert!(!config.gui_enabled);
+        assert_eq!(config.default_tier, 2);
+        assert_eq!(config.display_mode, DisplayMode::Wayland);
+        assert_eq!(config.log_level, "debug");
+        assert_eq!(config.tap_bridge_socket, "/var/run/test.sock");
+        assert_eq!(config.tap_device, "test-tap0");
+    }
+
+    #[test]
+    fn parse_ini_comments_and_blanks() {
+        let ini = "\
+# This is a comment
+; This is also a comment
+
+[wine]
+# prefix = not_this
+prefix = /actual/path
+";
+        let mut config = Config::default();
+        parse_ini_config(ini, &mut config);
+        assert_eq!(config.wine_prefix, "/actual/path");
+    }
+
+    #[test]
+    fn parse_bool_variants() {
+        assert!(parse_bool("true"));
+        assert!(parse_bool("1"));
+        assert!(parse_bool("yes"));
+        assert!(parse_bool("on"));
+        assert!(!parse_bool("false"));
+        assert!(!parse_bool("0"));
+        assert!(!parse_bool("no"));
+        assert!(!parse_bool("off"));
     }
 }
