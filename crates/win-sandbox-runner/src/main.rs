@@ -8,6 +8,7 @@ mod display;
 mod env_sanitize;
 mod hasher;
 mod net;
+mod netopt;
 mod nvidia;
 mod prefix;
 mod rules;
@@ -20,7 +21,7 @@ mod wizard;
 use anyhow::Result;
 use clap::Parser;
 use std::process::ExitCode;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// win-sandbox-runner: Transparent tiered sandbox for Windows executables via Wine.
 #[derive(Parser, Debug)]
@@ -79,6 +80,15 @@ struct Args {
     /// On next launch, the app will run without sandboxing automatically.
     #[arg(long)]
     trust: bool,
+
+    /// Apply network optimizations for gaming (BBR, SQM, socket buffers, DSCP).
+    /// Requires root for tc/iptables/sysctl changes.
+    #[arg(long)]
+    optimize_net: bool,
+
+    /// Remove network optimizations previously applied by --optimize-net.
+    #[arg(long)]
+    cleanup_net: bool,
 }
 
 fn main() -> ExitCode {
@@ -108,6 +118,21 @@ fn main() -> ExitCode {
 }
 
 fn run(args: &Args) -> Result<ExitCode> {
+    // --cleanup-net: remove network optimizations and exit
+    if args.cleanup_net {
+        let config = netopt::load_config(None);
+        netopt::cleanup(&config)?;
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    // --optimize-net: apply network optimizations and exit
+    if args.optimize_net {
+        let config = netopt::load_config(None);
+        let result = netopt::optimize(&config)?;
+        println!("{result}");
+        return Ok(ExitCode::SUCCESS);
+    }
+
     // Check Wine version before proceeding
     if let Err(e) = check_wine_version() {
         warn!("Wine version check failed: {e}");
@@ -127,6 +152,25 @@ fn run(args: &Args) -> Result<ExitCode> {
     // --trust flag: save this app as trusted in rules.json
     if args.trust {
         save_trusted_rule(&args.exe, &hash)?;
+    }
+
+    // Auto-apply network optimization for game profiles
+    if let Some((profile, _)) = app_db.lookup_by_name(&args.exe) {
+        if profile.network && profile.gpu {
+            // This looks like a game — auto-optimize network
+            let net_config = netopt::load_config(None);
+            match netopt::optimize(&net_config) {
+                Ok(result) => {
+                    if result.bbr_applied || result.sqm_applied {
+                        info!("Network optimized for gaming");
+                        println!("{result}");
+                    }
+                }
+                Err(e) => {
+                    debug!("Auto network optimization skipped: {e}");
+                }
+            }
+        }
     }
 
     // Dispatch to the appropriate tier
