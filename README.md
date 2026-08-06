@@ -49,6 +49,85 @@ Full namespace isolation via `bwrap`. The binary runs in its own mount/PID/IPC n
 ### Tier 3 — OverlayFS Ephemeral
 Same as Tier 2 but with an OverlayFS layer backed by RAM (`/dev/shm`). All filesystem changes are lost when the process exits — perfect for untrusted installers, DRM, or anti-cheat that modifies system files.
 
+## Installation
+
+### One-liner (recommended)
+
+```bash
+curl -sSL https://raw.githubusercontent.com/Gaming-RF/APEX-WIN/main/install.sh | sudo bash
+```
+
+This script:
+- Detects your distro (Ubuntu, Zorin, Fedora, Arch)
+- Installs all dependencies (Wine, GTK4, bubblewrap, winetricks, etc.)
+- Installs Rust if not present
+- Clones, builds, and installs everything
+- Registers the binfmt_misc handler so `.exe` files auto-launch
+
+### .deb package (Ubuntu/Zorin/Debian)
+
+```bash
+# Build the .deb
+make deb
+
+# Install it
+sudo dpkg -i target/deb/win-sandbox-runner_0.1.0_amd64.deb
+sudo apt-get install -f  # fix any missing deps
+```
+
+### From source (any distro)
+
+```bash
+# Install Rust: https://rustup.rs
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# Clone and build
+git clone https://github.com/Gaming-RF/APEX-WIN.git
+cd APEX-WIN
+make cargo-release
+
+# Install (requires root for binfmt_misc)
+sudo make cargo-install
+```
+
+### cargo install (Rust only, no C components)
+
+```bash
+cargo install --path crates/win-sandbox-runner
+cargo install --path crates/win-sandbox-gui
+```
+
+### Uninstall
+
+```bash
+sudo make cargo-uninstall
+# or
+sudo win-sandbox-uninstall  # if installed via install.sh
+```
+
+## Quick Start
+
+After installation, just double-click any `.exe` file — it will run through Wine with automatic sandboxing.
+
+```bash
+# Run an app (auto-detected tier)
+win-sandbox-runner --exe MyApp.exe
+
+# Trust an app (no sandboxing, remembered for future runs)
+win-sandbox-runner --exe Fusion360.exe --trust
+
+# Force a specific tier
+win-sandbox-runner --exe untrusted.exe --tier 3
+
+# See what would happen
+win-sandbox-runner --exe app.exe --dry-run
+
+# Launch the GUI
+win-sandbox-gui
+```
+
+The built-in app database (`config/appdb.json`) contains 30+ known app profiles with recommended settings for Fusion 360, Steam, Office, Unity, Unreal, popular games, and more.
+
 ## Networking
 
 Tiers 2 and 3 support isolated networking via a TAP bridge architecture:

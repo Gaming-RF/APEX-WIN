@@ -1,12 +1,15 @@
-# Top-level Makefile — builds C components and eBPF
-# Requires: gcc, mingw-w64, clang, libbpf-dev, linux-headers
+# Top-level Makefile — builds C components, eBPF, and Rust crates
+# Requires: gcc, mingw-w64, clang, libbpf-dev, linux-headers, cargo
 
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
 LIBDIR ?= $(PREFIX)/lib
+CONFDIR ?= /etc/win-sandbox-runner
 WINE_DLLDIR ?= /usr/lib/wine/x86_64-windows
 SYSTEMD_DIR ?= /etc/systemd/system
 BINFMET_DIR ?= /etc/binfmt.d
+
+VERSION ?= $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
 
 CC      := gcc
 MINGW   := x86_64-w64-mingw32-gcc
@@ -34,6 +37,7 @@ EBPF_LOADER := csrc/win_tap_filter/loader
 EBPF_LOADER_SRC := csrc/win_tap_filter/loader.c
 
 .PHONY: all clean install install-dll install-bridge install-ebpf install-binfmt install-systemd
+.PHONY: cargo cargo-release cargo-test cargo-clippy cargo-install cargo-uninstall deb
 
 all: $(SYS_NETMP_DLL) $(TAP_BIN) $(EBPF_OBJ) $(EBPF_LOADER)
 
@@ -86,3 +90,47 @@ clean:
 	rm -f csrc/sys_netmp/*.o csrc/sys_netmp/*.dll
 	rm -f csrc/win-tap-bridge/*.o csrc/win-tap-bridge/win-tap-bridge
 	rm -f csrc/win_tap_filter/*.o csrc/win_tap_filter/*.bpf.o csrc/win_tap_filter/loader
+
+# --- Rust crates ---
+
+cargo:
+	cargo build --workspace
+
+cargo-release:
+	cargo build --release --workspace
+
+cargo-test:
+	cargo test --workspace
+
+cargo-clippy:
+	cargo clippy --workspace -- -D warnings
+
+# Install Rust binaries + config + C components
+cargo-install: cargo-release install-bridge install-ebpf install-dll install-binfmt install-systemd
+	install -d $(DESTDIR)$(BINDIR)
+	install -m 755 target/release/win-sandbox-runner $(DESTDIR)$(BINDIR)/
+	install -m 755 target/release/win-sandbox-gui $(DESTDIR)$(BINDIR)/
+	install -d $(DESTDIR)$(CONFDIR)
+	install -m 644 config/rules.json $(DESTDIR)$(CONFDIR)/
+	install -m 644 config/appdb.json $(DESTDIR)$(CONFDIR)/
+	install -m 644 config/rules.schema.json $(DESTDIR)$(CONFDIR)/
+	@# Register binfmt_misc
+	@if [ -d /proc/sys/fs/binfmt_misc ]; then \
+		echo -1 > /proc/sys/fs/binfmt_misc/win-sandbox-runner 2>/dev/null || true; \
+		echo ":win-sandbox-runner:E::exe::$(DESTDIR)$(BINDIR)/win-sandbox-runner:" > /proc/sys/fs/binfmt_misc/register 2>/dev/null && \
+		echo "binfmt_misc handler registered" || \
+		echo "WARN: Failed to register binfmt handler"; \
+	fi
+	@echo "Installed win-sandbox-runner $(VERSION)"
+
+cargo-uninstall:
+	@if [ -f /proc/sys/fs/binfmt_misc/win-sandbox-runner ]; then \
+		echo -1 > /proc/sys/fs/binfmt_misc/win-sandbox-runner 2>/dev/null || true; \
+	fi
+	rm -f $(DESTDIR)$(BINDIR)/win-sandbox-runner
+	rm -f $(DESTDIR)$(BINDIR)/win-sandbox-gui
+	rm -rf $(DESTDIR)$(CONFDIR)
+	@echo "Removed. User config at ~/.config/win-sandbox/ preserved."
+
+deb: cargo-release
+	./scripts/build-deb.sh $(VERSION)
