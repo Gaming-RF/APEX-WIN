@@ -24,8 +24,6 @@ int main(int argc, char *argv[])
     const char *obj_path = (argc > 1) ? argv[1] : DEFAULT_OBJ_PATH;
     struct bpf_object *obj = NULL;
     struct bpf_program *prog = NULL;
-    struct bpf_tc_hook *hook = NULL;
-    struct bpf_tc_opts *opts = NULL;
     int ifindex;
     int err;
 
@@ -38,7 +36,7 @@ int main(int argc, char *argv[])
 
     /* Load eBPF object */
     obj = bpf_object__open(obj_path);
-    if (!obj) {
+    if (libbpf_get_error(obj)) {
         fprintf(stderr, "Failed to open eBPF object: %s\n", strerror(errno));
         return 1;
     }
@@ -57,8 +55,29 @@ int main(int argc, char *argv[])
         goto cleanup;
     }
 
-    /* TODO: Create TC hook and attach program */
-    /* bpf_tc_hook_create() + bpf_tc_attach() */
+    /* Create TC hook on ingress */
+    DECLARE_LIBBPF_OPTS(bpf_tc_hook, hook,
+        .ifindex = ifindex,
+        .attach_point = BPF_TC_INGRESS,
+    );
+
+    err = bpf_tc_hook_create(&hook);
+    if (err && err != -EEXIST) {
+        fprintf(stderr, "Failed to create TC hook: %d\n", err);
+        goto cleanup;
+    }
+
+    /* Attach the eBPF program */
+    DECLARE_LIBBPF_OPTS(bpf_tc_opts, opts,
+        .prog_fd = bpf_program__fd(prog),
+        .flags = BPF_F_ALLOW_MULTI,
+    );
+
+    err = bpf_tc_attach(&hook, &opts);
+    if (err) {
+        fprintf(stderr, "Failed to attach TC program: %d\n", err);
+        goto cleanup;
+    }
 
     printf("eBPF TC classifier attached to %s (ifindex %d)\n",
            TAP_DEVICE_NAME, ifindex);

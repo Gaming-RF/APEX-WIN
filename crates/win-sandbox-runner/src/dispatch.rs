@@ -13,6 +13,15 @@ pub fn is_untrusted_path(path: &str) -> bool {
     untrusted.iter().any(|prefix| path.starts_with(prefix))
 }
 
+/// Resolve whether network access is allowed for this binary.
+fn resolve_network_permission(rules: &RulesFile, hash: &str) -> bool {
+    if let Some(entry) = rules::lookup_by_hash(rules, hash) {
+        entry.network
+    } else {
+        rules.defaults.network_default
+    }
+}
+
 /// Execute the appropriate tier for the given binary.
 pub fn execute(args: &Args, hash: &str, rules: &RulesFile) -> Result<ExitCode> {
     // Determine tier
@@ -33,8 +42,12 @@ pub fn execute(args: &Args, hash: &str, rules: &RulesFile) -> Result<ExitCode> {
         t
     };
 
+    // Determine network permission
+    let network = resolve_network_permission(rules, hash);
+    info!("Network access: {network}");
+
     if args.dry_run {
-        info!("[DRY RUN] Would execute tier {tier} for {}", args.exe);
+        info!("[DRY RUN] Would execute tier {tier} for {} (network={network})", args.exe);
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -43,8 +56,8 @@ pub fn execute(args: &Args, hash: &str, rules: &RulesFile) -> Result<ExitCode> {
     match tier {
         Tier::Tier0 => crate::tier0::run(args),
         Tier::Tier1 => crate::tier1::run(args),
-        Tier::Tier2 => crate::tier2::run(args),
-        Tier::Tier3 => crate::tier3::run(args),
+        Tier::Tier2 => crate::tier2::run_with_network(args, network),
+        Tier::Tier3 => crate::tier3::run_with_network(args, network),
     }
 }
 
@@ -82,5 +95,32 @@ mod tests {
         assert!(is_untrusted_path("/var/tmp/test.exe"));
         assert!(!is_untrusted_path("/home/user/game.exe"));
         assert!(!is_untrusted_path("/opt/wine-prefix/drive_c/app.exe"));
+    }
+
+    #[test]
+    fn resolve_network_from_rules() {
+        use win_sandbox_common::rules_schema::{RuleDefaults, RuleEntry};
+        use win_sandbox_common::tier::Tier;
+
+        let rules = RulesFile {
+            version: 1,
+            entries: vec![RuleEntry {
+                hash: "abc123".into(),
+                name: "test".into(),
+                tier: Tier::Tier2,
+                allowed_paths: vec![],
+                network: true,
+                gpu: false,
+            }],
+            defaults: RuleDefaults {
+                unmapped_tier: Tier::Tier0,
+                untrusted_path_tier: Tier::Tier2,
+                network_default: false,
+                gpu_default: false,
+            },
+        };
+
+        assert!(resolve_network_permission(&rules, "abc123"));
+        assert!(!resolve_network_permission(&rules, "unknown"));
     }
 }

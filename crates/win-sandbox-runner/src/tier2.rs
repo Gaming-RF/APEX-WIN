@@ -9,17 +9,19 @@ const RO_SYSTEM_DIRS: &[&str] = &[
     "/usr", "/lib", "/lib32", "/lib64", "/bin", "/sbin", "/opt", "/etc",
 ];
 
-/// Tier 2: Bubblewrap container.
-///
-/// Launches wine inside a bubblewrap container with:
-/// - New mount, PID, IPC namespaces
-/// - tmpfs for /, /home, /tmp
-/// - Read-only binds for /usr, /lib, /etc
-/// - GPU passthrough (if detected)
-/// - Audio socket binding
-/// - Display socket forwarding
+/// Tier 2: Bubblewrap container with optional networking.
+#[allow(dead_code)]
 pub fn run(args: &Args) -> Result<ExitCode> {
-    info!("Tier 2: Bubblewrap container for {}", args.exe);
+    run_with_network(args, false)
+}
+
+/// Tier 2: Bubblewrap container with explicit network control.
+///
+/// When `network` is true, starts the TAP bridge daemon and bind-mounts
+/// its Unix socket + sys_netmp.dll into the container for isolated
+/// Wine networking. When false, the container runs without network.
+pub fn run_with_network(args: &Args, network: bool) -> Result<ExitCode> {
+    info!("Tier 2: Bubblewrap container for {} (network={network})", args.exe);
 
     let config = crate::config::load_config(None);
 
@@ -104,6 +106,12 @@ pub fn run(args: &Args) -> Result<ExitCode> {
     }
     // Override display env with detected values (more reliable than raw env)
     apply_display_env(&mut cmd, &display);
+
+    // Networking: TAP bridge or isolated
+    if let Err(e) = crate::net::configure_bwrap_networking(&mut cmd, network, &config) {
+        warn!("Networking setup failed: {e}");
+        warn!("Continuing without bridge networking");
+    }
 
     // The command to run inside the sandbox
     cmd.args(["--", "wine"]);

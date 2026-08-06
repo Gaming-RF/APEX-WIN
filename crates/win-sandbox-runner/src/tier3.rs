@@ -2,23 +2,23 @@ use crate::Args;
 use anyhow::{bail, Result};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, ExitCode};
-use tracing::info;
+use tracing::{info, warn};
 
 /// Base directory for overlay work (RAM-backed via /dev/shm).
 const OVERLAY_BASE: &str = "/dev/shm/win-run";
 
 /// Tier 3: OverlayFS + RAM ephemeral sandbox.
-///
-/// Creates an OverlayFS mount with:
-/// - lowerdir = base wine prefix (read-only)
-/// - upperdir = /dev/shm/win-run-{pid}/upper (RAM-backed)
-/// - workdir = /dev/shm/win-run-{pid}/work
-/// - merged = /dev/shm/win-run-{pid}/merged (WINEPREFIX)
-///
-/// All changes are lost when the process exits.
-/// Cleanup is handled by the self-pipe trick + atexit + panic hook.
+#[allow(dead_code)]
 pub fn run(args: &Args) -> Result<ExitCode> {
-    info!("Tier 3: OverlayFS ephemeral sandbox for {}", args.exe);
+    run_with_network(args, false)
+}
+
+/// Tier 3: OverlayFS + RAM ephemeral sandbox with explicit network control.
+///
+/// When `network` is true, starts the TAP bridge and sets up Wine DLL
+/// environment for isolated networking through the overlay.
+pub fn run_with_network(args: &Args, network: bool) -> Result<ExitCode> {
+    info!("Tier 3: OverlayFS ephemeral sandbox for {} (network={network})", args.exe);
 
     let config = crate::config::load_config(None);
     let pid = std::process::id();
@@ -69,6 +69,25 @@ pub fn run(args: &Args) -> Result<ExitCode> {
     }
     // Override WINEPREFIX to point at the overlay merged dir
     cmd.env("WINEPREFIX", &dirs.merged);
+
+    // Networking: TAP bridge via Wine DLL
+    if network {
+        if let Err(e) = crate::net::ensure_bridge_running(Some(&config.tap_bridge_socket)) {
+            warn!("Failed to start TAP bridge: {e}");
+            warn!("Continuing without bridge networking");
+        } else {
+            if let Some(dll_dir) = crate::net::find_dll_path() {
+                if let Some(parent) = dll_dir.parent() {
+                    let wine_dllpath = std::env::var("WINEDLLPATH")
+                        .map(|existing| format!("{existing}:{}", parent.display()))
+                        .unwrap_or_else(|_| parent.display().to_string());
+                    cmd.env("WINEDLLPATH", wine_dllpath);
+                }
+            }
+            cmd.env("WINE_BRIDGE_SOCKET", &config.tap_bridge_socket);
+            info!("Networking enabled via TAP bridge for OverlayFS sandbox");
+        }
+    }
 
     let err = cmd.exec();
 

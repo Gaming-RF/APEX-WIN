@@ -6,19 +6,32 @@
 #include "pipe.h"
 #include "ioctl.h"
 
+#define PIPE_CONNECT_RETRIES  50
+#define PIPE_CONNECT_DELAY_MS 100
+
 HANDLE pipe_connect(const char *pipe_path)
 {
-    /* TODO: Implement CreateFileA with retry loop */
-    HANDLE h = CreateFileA(
-        pipe_path,
-        GENERIC_READ | GENERIC_WRITE,
-        0, NULL, OPEN_EXISTING, 0, NULL);
+    HANDLE h;
 
-    if (h == INVALID_HANDLE_VALUE) {
-        /* TODO: Wait for pipe with WaitNamedPipeA */
+    /* Retry loop: wait for the daemon to create the pipe */
+    for (int i = 0; i < PIPE_CONNECT_RETRIES; i++) {
+        h = CreateFileA(
+            pipe_path,
+            GENERIC_READ | GENERIC_WRITE,
+            0, NULL, OPEN_EXISTING, 0, NULL);
+
+        if (h != INVALID_HANDLE_VALUE)
+            return h;
+
+        if (GetLastError() != ERROR_PIPE_BUSY)
+            break;
+
+        /* Wait for pipe to become available */
+        if (!WaitNamedPipeA(pipe_path, PIPE_CONNECT_DELAY_MS))
+            continue;
     }
 
-    return h;
+    return INVALID_HANDLE_VALUE;
 }
 
 DWORD pipe_send_frame(HANDLE pipe, const void *data, DWORD len)

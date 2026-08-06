@@ -27,8 +27,15 @@ DWORD ioctl_dispatch(HANDLE pipe, DWORD code, void *in_buf, DWORD in_len,
     }
 
     case IOCTL_NETMP_GET_STATUS: {
-        /* TODO: Return bridge status */
-        return ERROR_NOT_SUPPORTED;
+        /* Return bridge status as a 4-byte CONNECTED flag */
+        if (!out_buf || out_len < sizeof(DWORD))
+            return ERROR_INSUFFICIENT_BUFFER;
+
+        /* If pipe is valid, bridge is connected */
+        DWORD status = (pipe != INVALID_HANDLE_VALUE) ? 1 : 0;
+        *(DWORD *)out_buf = status;
+        *bytes_returned = sizeof(DWORD);
+        return ERROR_SUCCESS;
     }
 
     default:

@@ -6,6 +6,7 @@ mod dispatch;
 mod display;
 mod env_sanitize;
 mod hasher;
+mod net;
 mod nvidia;
 mod rules;
 mod tier0;

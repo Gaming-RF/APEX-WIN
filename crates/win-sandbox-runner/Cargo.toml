@@ -21,6 +21,7 @@ thiserror.workspace = true
 landlock.workspace = true
 libc.workspace = true
 tokio.workspace = true
+which.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
