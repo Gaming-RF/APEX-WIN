@@ -1,0 +1,13 @@
+[Unit]
+Description=win_tap_filter eBPF loader for TAP QoS marking
+Documentation=https://github.com/Gaming-RF/APEX-WIN
+After=win-tap-bridge.service
+Requires=win-tap-bridge.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/win_tap_filter-loader /usr/lib/win_tap_filter/win_tap_filter.bpf.o
+
+[Install]
+WantedBy=multi-user.target

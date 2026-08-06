@@ -1,0 +1,171 @@
+#!/bin/bash
+set -euo pipefail
+
+# win-sandbox-runner installer
+# Usage: sudo ./scripts/install.sh [--prefix /usr/local]
+
+PREFIX="${1:-/usr/local}"
+BINDIR="${PREFIX}/bin"
+LIBDIR="${PREFIX}/lib"
+WINE_DLLDIR="/usr/lib/wine/x86_64-windows"
+SYSTEMD_DIR="/etc/systemd/system"
+BINFMET_DIR="/etc/binfmt.d"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+info()  { echo -e "${GREEN}[INFO]${NC} $*"; }
+warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
+error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
+
+# --- Pre-flight checks ---
+
+check_root() {
+    if [[ $EUID -ne 0 ]]; then
+        error "This script must be run as root (use sudo)"
+    fi
+}
+
+check_deps() {
+    local missing=()
+    for cmd in cargo wine bwrap; do
+        if ! command -v "$cmd" &>/dev/null; then
+            missing+=("$cmd")
+        fi
+    done
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        error "Missing dependencies: ${missing[*]}"
+    fi
+}
+
+check_binfmt_conflict() {
+    if [[ -d /proc/sys/fs/binfmt_misc ]] && [[ -f /proc/sys/fs/binfmt_misc/Windows_PE ]]; then
+        error "An existing MZ binfmt handler (Windows_PE) is already registered.
+Please remove it first: echo -1 > /proc/sys/fs/binfmt_misc/Windows_PE"
+    fi
+    # Check for Wine's own binfmt
+    if command -v update-binfmts &>/dev/null; then
+        if update-binfmts --list 2>/dev/null | grep -q "MZ"; then
+            error "An existing MZ binfmt handler is registered via update-binfmts.
+Please remove it first: sudo update-binfmts --disable wine"
+        fi
+    fi
+}
+
+# --- Build ---
+
+build_rust() {
+    info "Building Rust workspace..."
+    cargo build --workspace --release
+    info "Running clippy..."
+    cargo clippy --workspace -- -D warnings 2>/dev/null || warn "Clippy warnings found (non-fatal)"
+}
+
+build_c() {
+    if command -v x86_64-w64-mingw32-gcc &>/dev/null; then
+        info "Building C components..."
+        make all
+    else
+        warn "MinGW not found, skipping Wine DLL build"
+        warn "Install: apt install gcc-mingw-w64-x86-64"
+        # Build only native components
+        make -C csrc/win-tap-bridge 2>/dev/null || true
+    fi
+}
+
+# --- Install ---
+
+install_rust_binaries() {
+    info "Installing Rust binaries to ${BINDIR}..."
+    install -Dm755 target/release/win-sandbox-runner "${DESTDIR:-}${BINDIR}/win-sandbox-runner"
+    install -Dm755 target/release/win-sandbox-gui "${DESTDIR:-}${BINDIR}/win-sandbox-gui"
+}
+
+install_c_components() {
+    # TAP bridge
+    if [[ -f csrc/win-tap-bridge/win-tap-bridge ]]; then
+        info "Installing win-tap-bridge to ${BINDIR}..."
+        install -Dm755 csrc/win-tap-bridge/win-tap-bridge "${DESTDIR:-}${BINDIR}/win-tap-bridge"
+    fi
+
+    # Wine DLL
+    if [[ -f csrc/sys_netmp/sys_netmp.dll ]]; then
+        info "Installing sys_netmp.dll to ${WINE_DLLDIR}..."
+        install -Dm755 csrc/sys_netmp/sys_netmp.dll "${DESTDIR:-}${WINE_DLLDIR}/sys_netmp.dll"
+    fi
+
+    # eBPF
+    if [[ -f csrc/win_tap_filter/loader ]]; then
+        info "Installing eBPF loader to ${BINDIR}..."
+        install -Dm755 csrc/win_tap_filter/loader "${DESTDIR:-}${BINDIR}/win_tap_filter-loader"
+    fi
+    if [[ -f csrc/win_tap_filter/win_tap_filter.bpf.o ]]; then
+        info "Installing eBPF object to ${LIBDIR}/win_tap_filter/..."
+        install -Dm644 csrc/win_tap_filter/win_tap_filter.bpf.o "${DESTDIR:-}${LIBDIR}/win_tap_filter/win_tap_filter.bpf.o"
+    fi
+}
+
+install_config() {
+    info "Installing configuration files..."
+    install -Dm644 config/rules.json "${DESTDIR:-}/etc/win-sandbox-runner/rules.json"
+    install -Dm644 config/rules.schema.json "${DESTDIR:-}/etc/win-sandbox-runner/rules.schema.json"
+    install -Dm644 config/win-sandbox-runner.conf "${DESTDIR:-}/etc/win-sandbox-runner.conf"
+
+    # User config directory
+    local user_home="${SUDO_HOME:-$HOME}"
+    if [[ -n "$user_home" && "$user_home" != "/" ]]; then
+        mkdir -p "${user_home}/.config/win-sandbox"
+        if [[ ! -f "${user_home}/.config/win-sandbox/rules.json" ]]; then
+            cp config/rules.json "${user_home}/.config/win-sandbox/rules.json"
+            info "User rules created at ${user_home}/.config/win-sandbox/rules.json"
+        fi
+    fi
+}
+
+install_binfmt() {
+    info "Installing binfmt handler..."
+    install -Dm644 binfmt/windows-pe.conf "${DESTDIR:-}${BINFMET_DIR}/windows-pe.conf"
+}
+
+install_systemd() {
+    info "Installing systemd units..."
+    install -Dm644 systemd/win-sandbox-runner.service "${DESTDIR:-}${SYSTEMD_DIR}/"
+    install -Dm644 systemd/win-tap-bridge.service "${DESTDIR:-}${SYSTEMD_DIR}/"
+    install -Dm644 systemd/win_tap_filter.service "${DESTDIR:-}${SYSTEMD_DIR}/"
+}
+
+# --- Main ---
+
+main() {
+    echo "win-sandbox-runner installer"
+    echo "==========================="
+    echo ""
+
+    check_root
+    check_deps
+    check_binfmt_conflict
+
+    build_rust
+    build_c
+
+    install_rust_binaries
+    install_c_components
+    install_config
+    install_binfmt
+    install_systemd
+
+    echo ""
+    info "Installation complete!"
+    echo ""
+    echo "Next steps:"
+    echo "  1. Register the binfmt handler:  systemctl start win-sandbox-runner"
+    echo "  2. (Optional) Start TAP bridge:  systemctl start win-tap-bridge"
+    echo "  3. (Optional) Load eBPF filter:  systemctl start win_tap_filter"
+    echo "  4. Edit rules:                   /etc/win-sandbox-runner/rules.json"
+    echo "  5. Run a .exe:                   wine program.exe"
+    echo ""
+}
+
+main "$@"

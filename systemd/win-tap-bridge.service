@@ -1,0 +1,16 @@
+[Unit]
+Description=Windows TAP Bridge for Wine sandbox networking
+Documentation=https://github.com/Gaming-RF/APEX-WIN
+After=network.target
+
+[Service]
+Type=simple
+ExecStartPre=/sbin/modprobe tun
+ExecStart=/usr/local/bin/win-tap-bridge
+AmbientCapabilities=CAP_NET_ADMIN
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target

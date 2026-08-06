@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "win-sandbox-runner rules",
+  "description": "Sandbox policy rules for Windows executables running via Wine",
+  "type": "object",
+  "required": ["version"],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1
+    },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["hash", "name", "tier"],
+        "properties": {
+          "hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "description": "SHA-256 hex string of the binary"
+          },
+          "name": {
+            "type": "string",
+            "description": "Human-readable name for this binary"
+          },
+          "tier": {
+            "type": "integer",
+            "enum": [0, 1, 2, 3],
+            "description": "Sandbox tier (0=none, 1=landlock, 2=bwrap, 3=overlayfs)"
+          },
+          "allowed_paths": {
+            "type": "array",
+            "items": { "type": "string" },
+            "default": []
+          },
+          "network": {
+            "type": "boolean",
+            "default": false
+          },
+          "gpu": {
+            "type": "boolean",
+            "default": false
+          }
+        }
+      }
+    },
+    "defaults": {
+      "type": "object",
+      "properties": {
+        "unmapped_tier": {
+          "type": "integer",
+          "enum": [0, 1, 2, 3],
+          "default": 0
+        },
+        "untrusted_path_tier": {
+          "type": "integer",
+          "enum": [0, 1, 2, 3],
+          "default": 2
+        },
+        "network_default": {
+          "type": "boolean",
+          "default": false
+        },
+        "gpu_default": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    }
+  }
+}
