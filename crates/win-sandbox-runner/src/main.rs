@@ -1,26 +1,16 @@
-#[allow(dead_code)]
 mod amd;
-#[allow(dead_code)]
 mod audio;
-#[allow(dead_code)]
 mod cleanup;
-#[allow(dead_code)]
 mod config;
 mod dispatch;
-#[allow(dead_code)]
 mod display;
-#[allow(dead_code)]
 mod env_sanitize;
 mod hasher;
-#[allow(dead_code)]
 mod nvidia;
 mod rules;
 mod tier0;
-#[allow(dead_code)]
 mod tier1;
-#[allow(dead_code)]
 mod tier2;
-#[allow(dead_code)]
 mod tier3;
 
 use anyhow::Result;

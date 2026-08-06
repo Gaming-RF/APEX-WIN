@@ -3,6 +3,7 @@ use tracing::{debug, info};
 
 /// Information about an Nvidia GPU for bind-mounting into containers.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct NvidiaInfo {
     /// Device files to bind-mount (e.g., /dev/nvidia0, /dev/nvidiactl).
     pub devices: Vec<String>,

@@ -3,6 +3,7 @@ use tracing::{debug, info};
 
 /// Information about AMD GPU for bind-mounting into containers.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AmdInfo {
     /// DRI render node device files (e.g., /dev/dri/renderD128).
     pub render_nodes: Vec<String>,

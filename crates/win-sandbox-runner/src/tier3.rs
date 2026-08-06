@@ -1,7 +1,11 @@
 use crate::Args;
-use anyhow::Result;
-use std::process::ExitCode;
+use anyhow::{bail, Result};
+use std::os::unix::process::CommandExt;
+use std::process::{Command, ExitCode};
 use tracing::info;
+
+/// Base directory for overlay work (RAM-backed via /dev/shm).
+const OVERLAY_BASE: &str = "/dev/shm/win-run";
 
 /// Tier 3: OverlayFS + RAM ephemeral sandbox.
 ///
@@ -11,16 +15,140 @@ use tracing::info;
 /// - workdir = /dev/shm/win-run-{pid}/work
 /// - merged = /dev/shm/win-run-{pid}/merged (WINEPREFIX)
 ///
-/// All changes are lost when the process exits. Cleanup via self-pipe trick.
+/// All changes are lost when the process exits.
+/// Cleanup is handled by the self-pipe trick + atexit + panic hook.
 pub fn run(args: &Args) -> Result<ExitCode> {
     info!("Tier 3: OverlayFS ephemeral sandbox for {}", args.exe);
 
-    // TODO: Create /dev/shm/win-run-{pid}/ directory structure
-    // TODO: Mount OverlayFS with lowerdir/upperdir/workdir
-    // TODO: Set up self-pipe trick for SIGCHLD cleanup
-    // TODO: Set up atexit + panic hook for overlay unmount
-    // TODO: Exec wine with WINEPREFIX pointing to merged overlay
-    // TODO: Unmount overlay and clean up on exit
+    let config = crate::config::load_config(None);
+    let pid = std::process::id();
+    let dirs = overlay_dirs(pid);
 
-    todo!("Tier 3 (OverlayFS) not yet implemented")
+    // Create directory structure in /dev/shm (RAM-backed)
+    std::fs::create_dir_all(&dirs.upper)?;
+    std::fs::create_dir_all(&dirs.work)?;
+    std::fs::create_dir_all(&dirs.merged)?;
+
+    // The lowerdir is the existing wine prefix (or a minimal stub)
+    let lower_dir = resolve_lower_dir(&config.wine_prefix, &dirs.base)?;
+
+    // Mount OverlayFS
+    let opts = mount_opts(&lower_dir, &dirs.upper, &dirs.work);
+    info!("Mounting OverlayFS: lower={lower_dir}, upper={}", dirs.upper);
+
+    let status = Command::new("mount")
+        .args(["-t", "overlay", "overlay", "-o", &opts, &dirs.merged])
+        .status();
+
+    match status {
+        Ok(s) if s.success() => {
+            info!("OverlayFS mounted at {}", dirs.merged);
+        }
+        Ok(s) => {
+            bail!("OverlayFS mount failed with status: {s}");
+        }
+        Err(e) => {
+            bail!("Failed to execute mount: {e} (try running with sudo or use --tier 2)");
+        }
+    }
+
+    // Set up cleanup hooks
+    crate::cleanup::install_cleanup_hooks(dirs.merged.clone());
+    let _pipe_fd = crate::cleanup::init_cleanup_pipe()?;
+    crate::cleanup::install_sigchld_handler()?;
+
+    // Exec wine with WINEPREFIX pointing to the merged overlay
+    info!("Launching wine in OverlayFS sandbox (changes lost on exit)");
+
+    let sandbox_env = crate::env_sanitize::build_sandbox_env(&config)?;
+    let mut cmd = Command::new("wine");
+    cmd.arg(&args.exe).args(&args.args);
+    cmd.env_clear();
+    for (key, val) in &sandbox_env {
+        cmd.env(key, val);
+    }
+    // Override WINEPREFIX to point at the overlay merged dir
+    cmd.env("WINEPREFIX", &dirs.merged);
+
+    let err = cmd.exec();
+
+    // exec() only returns on error — clean up before bailing
+    crate::cleanup::cleanup_overlay(&dirs.merged);
+    bail!("Failed to exec wine: {err}");
+}
+
+/// Paths for an overlay instance.
+#[derive(Debug, Clone)]
+pub struct OverlayDirs {
+    pub base: String,
+    pub upper: String,
+    pub work: String,
+    pub merged: String,
+}
+
+/// Compute overlay directory paths for a given PID.
+pub fn overlay_dirs(pid: u32) -> OverlayDirs {
+    let base = format!("{OVERLAY_BASE}-{pid}");
+    OverlayDirs {
+        upper: format!("{base}/upper"),
+        work: format!("{base}/work"),
+        merged: format!("{base}/merged"),
+        base,
+    }
+}
+
+/// Build the mount options string for overlayfs.
+pub fn mount_opts(lower: &str, upper: &str, work: &str) -> String {
+    format!("lowerdir={lower},upperdir={upper},workdir={work}")
+}
+
+/// Resolve the lower directory: use existing wine prefix, or create a stub.
+fn resolve_lower_dir(wine_prefix: &str, base_dir: &str) -> Result<String> {
+    if std::path::Path::new(wine_prefix).exists() {
+        Ok(wine_prefix.to_string())
+    } else {
+        let stub = format!("{base_dir}/lower");
+        std::fs::create_dir_all(&stub)?;
+        Ok(stub)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overlay_dirs_paths() {
+        let dirs = overlay_dirs(12345);
+        assert_eq!(dirs.base, "/dev/shm/win-run-12345");
+        assert_eq!(dirs.upper, "/dev/shm/win-run-12345/upper");
+        assert_eq!(dirs.work, "/dev/shm/win-run-12345/work");
+        assert_eq!(dirs.merged, "/dev/shm/win-run-12345/merged");
+    }
+
+    #[test]
+    fn mount_opts_format() {
+        let opts = mount_opts("/home/user/.wine", "/tmp/upper", "/tmp/work");
+        assert_eq!(opts, "lowerdir=/home/user/.wine,upperdir=/tmp/upper,workdir=/tmp/work");
+    }
+
+    #[test]
+    fn resolve_lower_with_existing_prefix() {
+        // /usr should exist
+        let result = resolve_lower_dir("/usr", "/tmp/test-overlay");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "/usr");
+    }
+
+    #[test]
+    fn resolve_lower_with_missing_prefix() {
+        let result = resolve_lower_dir(
+            "/nonexistent/wine/prefix",
+            "/tmp/win-run-test-nonexistent",
+        );
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("lower"));
+        // Cleanup
+        let _ = std::fs::remove_dir_all("/tmp/win-run-test-nonexistent");
+    }
 }

@@ -18,6 +18,7 @@ pub enum DisplayServer {
 
 /// Display mode configuration for the sandbox.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum DisplayMode {
     /// Use host X11 directly (DANGEROUS — keylogger vector).
     HostX11,
@@ -58,11 +59,13 @@ pub fn detect() -> DisplayServer {
 }
 
 /// Check if Xephyr is available for nested X11.
+#[allow(dead_code)]
 pub fn has_xephyr() -> bool {
     which("Xephyr").is_some()
 }
 
 /// Warn about display security implications.
+#[allow(dead_code)]
 pub fn warn_display_security(mode: &DisplayMode) {
     match mode {
         DisplayMode::HostX11 => {
@@ -85,6 +88,7 @@ pub fn warn_display_security(mode: &DisplayMode) {
 }
 
 /// Find a command in PATH.
+#[allow(dead_code)]
 fn which(cmd: &str) -> Option<String> {
     if let Ok(path) = std::env::var("PATH") {
         for dir in path.split(':') {

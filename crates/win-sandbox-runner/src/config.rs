@@ -15,6 +15,7 @@ const CONFIG_SEARCH_PATHS: &[&str] = &[
 
 /// Runtime configuration.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Config {
     pub wine_prefix: String,
     pub rules_path: Option<PathBuf>,
@@ -27,6 +28,7 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum DisplayMode {
     HostX11,
     NestedX11,

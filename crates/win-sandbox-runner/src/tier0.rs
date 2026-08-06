@@ -5,24 +5,23 @@ use tracing::info;
 
 /// Tier 0: Direct wine execution with no sandboxing.
 ///
-/// Sets up the environment (WINEPREFIX, display, audio) and exec's wine directly.
+/// Sets up a sanitized environment (allowlisted vars only, no secrets)
+/// and exec's wine directly.
 pub fn run(args: &Args) -> Result<ExitCode> {
     info!("Tier 0: Direct wine execution for {}", args.exe);
 
     let config = crate::config::load_config(None);
-    let env = crate::env_sanitize::build_sandbox_env(&config)?;
+    let sandbox_env = crate::env_sanitize::build_sandbox_env(&config)?;
 
     let mut cmd = Command::new("wine");
     cmd.arg(&args.exe);
     cmd.args(&args.args);
 
-    // Apply sanitized environment
-    for (key, value) in &env {
-        cmd.env(key, value);
+    // Clear inherited environment and apply only sanitized vars
+    cmd.env_clear();
+    for (key, val) in &sandbox_env {
+        cmd.env(key, val);
     }
-
-    // Set recursion guard
-    cmd.env("WIN_SANDBOX_ACTIVE", "1");
 
     let status = cmd.status()?;
     if status.success() {
