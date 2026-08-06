@@ -57,6 +57,23 @@ pub fn run_with_network(args: &Args, network: bool) -> Result<ExitCode> {
     let _pipe_fd = crate::cleanup::init_cleanup_pipe()?;
     crate::cleanup::install_sigchld_handler()?;
 
+    // Resolve display mode and launch nested display server if needed
+    let display_mode = crate::display::resolve_display_mode(
+        args.nested_x11,
+        args.xvfb,
+        args.host_x11,
+        args.wayland,
+        3, // Tier 3
+    );
+    crate::display::warn_display_security(&display_mode);
+
+    // Launch Xephyr/Xvfb if needed (kept alive by DisplayHandle Drop guard)
+    let _display_handle: Option<crate::display::DisplayHandle> = match display_mode {
+        crate::display::DisplayMode::NestedX11 => crate::display::launch_nested_x11(),
+        crate::display::DisplayMode::Xvfb => crate::display::launch_xvfb(),
+        _ => None,
+    };
+
     // Exec wine with WINEPREFIX pointing to the merged overlay
     info!("Launching wine in OverlayFS sandbox (changes lost on exit)");
 
@@ -69,6 +86,9 @@ pub fn run_with_network(args: &Args, network: bool) -> Result<ExitCode> {
     }
     // Override WINEPREFIX to point at the overlay merged dir
     cmd.env("WINEPREFIX", &dirs.merged);
+
+    // Apply display environment based on resolved mode
+    apply_display_for_mode(&mut cmd, &display_mode, _display_handle.as_ref());
 
     // Networking: TAP bridge via Wine DLL
     if network {
@@ -94,6 +114,39 @@ pub fn run_with_network(args: &Args, network: bool) -> Result<ExitCode> {
     // exec() only returns on error — clean up before bailing
     crate::cleanup::cleanup_overlay(&dirs.merged);
     bail!("Failed to exec wine: {err}");
+}
+
+/// Apply display environment variables based on the resolved display mode.
+fn apply_display_for_mode(
+    cmd: &mut Command,
+    mode: &crate::display::DisplayMode,
+    _display_handle: Option<&crate::display::DisplayHandle>,
+) {
+    match mode {
+        crate::display::DisplayMode::NestedX11 | crate::display::DisplayMode::Xvfb => {
+            if let Some(handle) = _display_handle {
+                cmd.env("DISPLAY", &handle.display);
+                info!("Sandbox DISPLAY={}", handle.display);
+            } else {
+                // Fallback: pass host DISPLAY (not ideal but works)
+                if let Ok(display) = std::env::var("DISPLAY") {
+                    cmd.env("DISPLAY", &display);
+                }
+            }
+        }
+        crate::display::DisplayMode::Wayland => {
+            if let Ok(wl) = std::env::var("WAYLAND_DISPLAY") {
+                cmd.env("WAYLAND_DISPLAY", &wl);
+                cmd.env("WINE_WAYLAND_DRIVER", "1");
+                info!("Sandbox WAYLAND_DISPLAY={wl}");
+            }
+        }
+        crate::display::DisplayMode::HostX11 => {
+            if let Ok(display) = std::env::var("DISPLAY") {
+                cmd.env("DISPLAY", &display);
+            }
+        }
+    }
 }
 
 /// Paths for an overlay instance.
@@ -153,7 +206,6 @@ mod tests {
 
     #[test]
     fn resolve_lower_with_existing_prefix() {
-        // /usr should exist
         let result = resolve_lower_dir("/usr", "/tmp/test-overlay");
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "/usr");
@@ -167,7 +219,6 @@ mod tests {
         );
         assert!(result.is_ok());
         assert!(result.unwrap().contains("lower"));
-        // Cleanup
         let _ = std::fs::remove_dir_all("/tmp/win-run-test-nonexistent");
     }
 }

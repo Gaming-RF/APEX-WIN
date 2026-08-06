@@ -2,7 +2,7 @@ use crate::Args;
 use anyhow::{bail, Result};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, ExitCode};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// System directories that get read-only bind-mounted into the container.
 const RO_SYSTEM_DIRS: &[&str] = &[
@@ -34,6 +34,23 @@ pub fn run_with_network(args: &Args, network: bool) -> Result<ExitCode> {
         warn!("Nvidia GPU detected — GPU passthrough with bwrap may fail");
         warn!("Consider using --tier 1 (Landlock) for Nvidia systems");
     }
+
+    // Resolve display mode and launch nested display server if needed
+    let display_mode = crate::display::resolve_display_mode(
+        args.nested_x11,
+        args.xvfb,
+        args.host_x11,
+        args.wayland,
+        2, // Tier 2
+    );
+    crate::display::warn_display_security(&display_mode);
+
+    // Launch Xephyr/Xvfb if needed (kept alive by DisplayHandle Drop guard)
+    let _display_handle: Option<crate::display::DisplayHandle> = match display_mode {
+        crate::display::DisplayMode::NestedX11 => crate::display::launch_nested_x11(),
+        crate::display::DisplayMode::Xvfb => crate::display::launch_xvfb(),
+        _ => None,
+    };
 
     let hostname = sandbox_hostname();
 
@@ -86,8 +103,10 @@ pub fn run_with_network(args: &Args, network: bool) -> Result<ExitCode> {
     // GPU passthrough
     bind_gpu_devices(&mut cmd, nvidia.is_some(), amd_gpu.is_some());
 
-    // NTsync (Wine 9+ synchronization device)
-    crate::net::bind_ntsync(&mut cmd);
+    // Gamepad/controller access (Plan §11: /dev/input isolation)
+    if args.gamepad {
+        bind_gamepad_devices(&mut cmd);
+    }
 
     // Audio socket
     if let Some(ref server) = audio {
@@ -101,14 +120,18 @@ pub fn run_with_network(args: &Args, network: bool) -> Result<ExitCode> {
         }
     }
 
+    // NTsync (Wine 9+ synchronization device)
+    crate::net::bind_ntsync(&mut cmd);
+
     // Sanitized environment — clear inherited env, apply allowlisted vars only
     let sandbox_env = crate::env_sanitize::build_sandbox_env(&config)?;
     cmd.env_clear();
     for (key, val) in &sandbox_env {
         cmd.env(key, val);
     }
-    // Override display env with detected values (more reliable than raw env)
-    apply_display_env(&mut cmd, &display);
+
+    // Apply display environment based on resolved mode
+    apply_display_for_mode(&mut cmd, &display_mode, &display, _display_handle.as_ref());
 
     // Networking: TAP bridge or isolated
     if let Err(e) = crate::net::configure_bwrap_networking(&mut cmd, network, &config) {
@@ -184,6 +207,91 @@ fn bind_gpu_devices(cmd: &mut Command, has_nvidia: bool, has_amd: bool) {
     }
 }
 
+/// Bind-mount gamepad/controller devices from /dev/input.
+/// Scans for /dev/input/event* devices and bind-mounts only gamepad-related ones.
+/// Falls back to binding the entire /dev/input directory if sysfs scanning fails.
+fn bind_gamepad_devices(cmd: &mut Command) {
+    let input_dir = std::path::Path::new("/dev/input");
+    if !input_dir.exists() {
+        debug!("Gamepad: /dev/input does not exist");
+        return;
+    }
+
+    // Try to read /sys/class/input/*/device/name to identify gamepads
+    let gamepad_keywords = ["gamepad", "controller", "joystick", "xbox", "playstation",
+                            "dualshock", "dualsense", "switch", "pro controller", "joy-con"];
+
+    let mut found_gamepads = false;
+
+    if let Ok(entries) = std::fs::read_dir("/sys/class/input") {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+
+            // Only look at event* entries
+            if !name_str.starts_with("event") {
+                continue;
+            }
+
+            // Read the device name from sysfs
+            let device_name_path = entry.path().join("device").join("name");
+            if let Ok(device_name) = std::fs::read_to_string(&device_name_path) {
+                let device_name_lower = device_name.trim().to_lowercase();
+                let is_gamepad = gamepad_keywords.iter().any(|kw| device_name_lower.contains(kw));
+
+                if is_gamepad {
+                    let event_path = format!("/dev/input/{name_str}");
+                    if std::path::Path::new(&event_path).exists() {
+                        cmd.args(["--dev-bind", &event_path, &event_path]);
+                        info!("Gamepad: bind-mounted {event_path} ({})", device_name.trim());
+                        found_gamepads = true;
+                    }
+                }
+            }
+        }
+    }
+
+    if !found_gamepads {
+        debug!("Gamepad: no gamepad devices found in /dev/input");
+        debug!("Gamepad: if you have a controller, ensure it is connected before launching");
+    }
+}
+
+/// Apply display environment variables based on the resolved display mode.
+fn apply_display_for_mode(
+    cmd: &mut Command,
+    mode: &crate::display::DisplayMode,
+    detected: &crate::display::DisplayServer,
+    _display_handle: Option<&crate::display::DisplayHandle>,
+) {
+    match mode {
+        crate::display::DisplayMode::NestedX11 | crate::display::DisplayMode::Xvfb => {
+            // Use the display from Xephyr/Xvfb if launched
+            if let Some(handle) = _display_handle {
+                cmd.env("DISPLAY", &handle.display);
+                info!("Sandbox DISPLAY={}", handle.display);
+            } else {
+                // Fallback: use detected display
+                apply_display_env(cmd, detected);
+            }
+        }
+        crate::display::DisplayMode::Wayland => {
+            if let crate::display::DisplayServer::Wayland { display: wl }
+            | crate::display::DisplayServer::XWayland { wayland_display: wl, .. } = detected
+            {
+                cmd.env("WAYLAND_DISPLAY", wl);
+                cmd.env("WINE_WAYLAND_DRIVER", "1");
+                info!("Sandbox WAYLAND_DISPLAY={}", wl);
+            } else {
+                warn!("--wayland specified but no Wayland display detected");
+            }
+        }
+        crate::display::DisplayMode::HostX11 => {
+            apply_display_env(cmd, detected);
+        }
+    }
+}
+
 /// Set DISPLAY/WAYLAND_DISPLAY env vars based on detected display server.
 fn apply_display_env(cmd: &mut Command, display: &crate::display::DisplayServer) {
     match display {
@@ -209,21 +317,17 @@ mod tests {
     fn hostname_format() {
         let h = sandbox_hostname();
         assert!(h.starts_with("winrun-"));
-        // "winrun-" + 8 hex chars
         assert_eq!(h.len(), 15);
-        // Should be valid hex after prefix
         let hex_part = &h[7..];
         assert!(u32::from_str_radix(hex_part, 16).is_ok());
     }
 
     #[test]
     fn ro_dirs_filter_existing() {
-        // /usr should exist on any Linux system
         let dirs = existing_ro_dirs();
         assert!(dirs.contains(&"/usr"));
         assert!(dirs.contains(&"/etc"));
         assert!(dirs.contains(&"/bin"));
-        // All returned dirs should be from RO_SYSTEM_DIRS
         for d in &dirs {
             assert!(RO_SYSTEM_DIRS.contains(d));
         }
@@ -232,13 +336,11 @@ mod tests {
     #[test]
     fn exe_parent_dir_basic() {
         assert_eq!(exe_parent_dir("/home/user/game.exe"), Some("/home/user"));
-        // "/" as parent is excluded (don't bind-mount root)
         assert_eq!(exe_parent_dir("/game.exe"), None);
     }
 
     #[test]
     fn exe_parent_dir_empty() {
-        // Bare filename has no parent
         assert_eq!(exe_parent_dir("game.exe"), None);
     }
 
@@ -249,7 +351,6 @@ mod tests {
         };
         let mut cmd = Command::new("true");
         apply_display_env(&mut cmd, &display);
-        // We can't inspect env vars on Command directly, but at least it didn't panic
     }
 
     #[test]
@@ -272,6 +373,11 @@ mod tests {
     fn bind_gpu_no_gpu() {
         let mut cmd = Command::new("true");
         bind_gpu_devices(&mut cmd, false, false);
-        // No panic, no devices bound
+    }
+
+    #[test]
+    fn bind_gamepad_does_not_panic() {
+        let mut cmd = Command::new("true");
+        bind_gamepad_devices(&mut cmd);
     }
 }

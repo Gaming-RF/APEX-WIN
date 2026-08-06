@@ -47,6 +47,27 @@ struct Args {
     #[arg(long)]
     dry_run: bool,
 
+    /// Allow gamepad/controller access in sandbox (Tier 2/3).
+    /// Bind-mounts /dev/input/event* for gamepad devices.
+    #[arg(long)]
+    gamepad: bool,
+
+    /// Use nested X11 (Xephyr) for display isolation (default for Tier 2/3).
+    #[arg(long)]
+    nested_x11: bool,
+
+    /// Use Xvfb virtual framebuffer (headless, no visible window).
+    #[arg(long)]
+    xvfb: bool,
+
+    /// Use host X11 directly (DANGEROUS: enables keylogger attacks).
+    #[arg(long)]
+    host_x11: bool,
+
+    /// Use Wayland with Wine Wayland driver.
+    #[arg(long)]
+    wayland: bool,
+
     /// Additional arguments passed to the Windows executable.
     #[arg(trailing_var_arg = true)]
     args: Vec<String>,

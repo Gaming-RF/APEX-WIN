@@ -141,6 +141,11 @@ mod tests {
             verbose: false,
             no_gui: false,
             dry_run: false,
+            gamepad: false,
+            nested_x11: false,
+            xvfb: false,
+            host_x11: false,
+            wayland: false,
             args: vec![],
         };
         let paths = build_ro_paths("/home/test/.wine", &args);
@@ -159,6 +164,11 @@ mod tests {
             verbose: false,
             no_gui: false,
             dry_run: false,
+            gamepad: false,
+            nested_x11: false,
+            xvfb: false,
+            host_x11: false,
+            wayland: false,
             args: vec![],
         };
         let paths = build_ro_paths("/tmp/.wine", &args);
