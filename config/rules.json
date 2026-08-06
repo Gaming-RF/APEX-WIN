@@ -2,8 +2,8 @@
   "version": 1,
   "entries": [],
   "defaults": {
-    "unmapped_tier": 0,
-    "untrusted_path_tier": 2,
+    "unmapped_tier": "tier0",
+    "untrusted_path_tier": "tier2",
     "network_default": false,
     "gpu_default": false
   }

@@ -11,6 +11,9 @@ AmbientCapabilities=CAP_NET_ADMIN
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ReadWritePaths=/var/run
 
 [Install]
 WantedBy=multi-user.target

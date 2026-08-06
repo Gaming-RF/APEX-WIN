@@ -25,9 +25,9 @@
             "description": "Human-readable name for this binary"
           },
           "tier": {
-            "type": "integer",
-            "enum": [0, 1, 2, 3],
-            "description": "Sandbox tier (0=none, 1=landlock, 2=bwrap, 3=overlayfs)"
+            "type": "string",
+            "enum": ["tier0", "tier1", "tier2", "tier3"],
+            "description": "Sandbox tier (tier0=none, tier1=landlock, tier2=bwrap, tier3=overlayfs)"
           },
           "allowed_paths": {
             "type": "array",
@@ -49,14 +49,14 @@
       "type": "object",
       "properties": {
         "unmapped_tier": {
-          "type": "integer",
-          "enum": [0, 1, 2, 3],
-          "default": 0
+          "type": "string",
+          "enum": ["tier0", "tier1", "tier2", "tier3"],
+          "default": "tier0"
         },
         "untrusted_path_tier": {
-          "type": "integer",
-          "enum": [0, 1, 2, 3],
-          "default": 2
+          "type": "string",
+          "enum": ["tier0", "tier1", "tier2", "tier3"],
+          "default": "tier2"
         },
         "network_default": {
           "type": "boolean",
