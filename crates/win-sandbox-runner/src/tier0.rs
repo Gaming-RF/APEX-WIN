@@ -7,7 +7,19 @@ use tracing::info;
 ///
 /// Sets up a sanitized environment (allowlisted vars only, no secrets)
 /// and exec's wine directly.
+#[allow(dead_code)]
 pub fn run(args: &Args) -> Result<ExitCode> {
+    run_with_env(args, &std::collections::HashMap::new())
+}
+
+/// Tier 0 with additional app-specific environment variables.
+///
+/// For trusted apps that need custom env (e.g. DXVK_HUD, MESA overrides).
+/// App env vars are layered on top of the sanitized base environment.
+pub fn run_with_env(
+    args: &Args,
+    app_env: &std::collections::HashMap<String, String>,
+) -> Result<ExitCode> {
     info!("Tier 0: Direct wine execution for {}", args.exe);
 
     let config = crate::config::load_config(None);
@@ -20,6 +32,10 @@ pub fn run(args: &Args) -> Result<ExitCode> {
     // Clear inherited environment and apply only sanitized vars
     cmd.env_clear();
     for (key, val) in &sandbox_env {
+        cmd.env(key, val);
+    }
+    // Layer app-specific env on top
+    for (key, val) in app_env {
         cmd.env(key, val);
     }
 

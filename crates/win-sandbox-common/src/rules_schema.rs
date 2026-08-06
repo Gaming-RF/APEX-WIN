@@ -29,6 +29,30 @@ pub struct RuleEntry {
     /// Whether GPU passthrough is permitted.
     #[serde(default)]
     pub gpu: bool,
+    /// Skip all sandboxing for this app — full access to filesystem, network,
+    /// GPU, and host resources. Use for trusted apps that need unrestricted
+    /// access (CAD software, game launchers, etc.).
+    #[serde(default)]
+    pub trusted: bool,
+    /// Install DXVK (DirectX-to-Vulkan translation layer) for this app.
+    #[serde(default)]
+    pub dxvk: bool,
+    /// Winetricks components to install before first run.
+    /// Examples: ["dotnet48", "vcrun2019", "d3dx9", "corefonts"]
+    #[serde(default)]
+    pub winetricks: Vec<String>,
+    /// Additional environment variables for this app.
+    /// Example: {"DXVK_HUD": "1", "MESA_GL_VERSION_OVERRIDE": "4.5"}
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+    /// Recommended Wine variant: "system" (default), "proton", "staging".
+    /// Only used by the GUI to suggest the right Wine version.
+    #[serde(default = "default_wine_variant")]
+    pub wine_variant: String,
+}
+
+fn default_wine_variant() -> String {
+    "system".to_string()
 }
 
 /// Default policy for unmapped binaries.

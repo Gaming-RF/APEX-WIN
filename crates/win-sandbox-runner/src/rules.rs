@@ -85,6 +85,11 @@ mod tests {
                 allowed_paths: vec![],
                 network: false,
                 gpu: false,
+                trusted: false,
+                dxvk: false,
+                winetricks: vec![],
+                env: std::collections::HashMap::new(),
+                wine_variant: "system".into(),
             }],
             defaults: Default::default(),
         };

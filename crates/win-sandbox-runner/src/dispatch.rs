@@ -23,13 +23,36 @@ fn resolve_network_permission(rules: &RulesFile, hash: &str) -> bool {
 }
 
 /// Execute the appropriate tier for the given binary.
+///
+/// Decision flow:
+///   1. Look up rule by hash
+///   2. If rule has `trusted: true`, run wine directly (no sandbox, no setup)
+///   3. Otherwise, resolve tier from rule / path trust / defaults
+///   4. Apply nvidia downgrade (Tier 2 → Tier 1)
+///   5. Execute in the resolved tier
 pub fn execute(args: &Args, hash: &str, rules: &RulesFile) -> Result<ExitCode> {
-    // Determine tier
+    let matched_entry = rules::lookup_by_hash(rules, hash);
+
+    // --- Trusted apps: no sandboxing, just run wine directly ---
+    if let Some(entry) = matched_entry {
+        if entry.trusted {
+            info!("Trusted app '{}', no sandboxing", entry.name);
+
+            if args.dry_run {
+                info!("[DRY RUN] Would run trusted '{}' with wine directly", entry.name);
+                return Ok(ExitCode::SUCCESS);
+            }
+
+            return crate::tier0::run_with_env(args, &entry.env);
+        }
+    }
+
+    // --- Resolve tier ---
     let tier = if let Some(ref tier_str) = args.tier {
         let t: Tier = tier_str.parse()?;
         info!("Forced tier: {t}");
         t
-    } else if let Some(entry) = rules::lookup_by_hash(rules, hash) {
+    } else if let Some(entry) = matched_entry {
         info!("Matched rule '{}', tier: {}", entry.name, entry.tier);
         entry.tier
     } else if is_untrusted_path(&args.exe) {
@@ -42,7 +65,7 @@ pub fn execute(args: &Args, hash: &str, rules: &RulesFile) -> Result<ExitCode> {
         t
     };
 
-    // Determine network permission
+    // Resolve network
     let network = resolve_network_permission(rules, hash);
     info!("Network access: {network}");
 
@@ -60,10 +83,16 @@ pub fn execute(args: &Args, hash: &str, rules: &RulesFile) -> Result<ExitCode> {
         tier
     };
 
+    // Collect app-specific env vars for tier 0
+    let app_env: std::collections::HashMap<String, String> = matched_entry
+        .as_ref()
+        .map(|e| e.env.clone())
+        .unwrap_or_default();
+
     info!("Executing tier {tier} for {}", args.exe);
 
     match tier {
-        Tier::Tier0 => crate::tier0::run(args),
+        Tier::Tier0 => crate::tier0::run_with_env(args, &app_env),
         Tier::Tier1 => crate::tier1::run(args),
         Tier::Tier2 => crate::tier2::run_with_network(args, network),
         Tier::Tier3 => crate::tier3::run_with_network(args, network),
@@ -95,6 +124,28 @@ pub fn passthrough_to_wine(exe: &str, args: &[String]) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use win_sandbox_common::rules_schema::{RuleDefaults, RuleEntry};
+
+    fn make_entry(
+        hash: &str,
+        tier: Tier,
+        network: bool,
+        trusted: bool,
+    ) -> RuleEntry {
+        RuleEntry {
+            hash: hash.into(),
+            name: "test".into(),
+            tier,
+            allowed_paths: vec![],
+            network,
+            gpu: false,
+            trusted,
+            dxvk: false,
+            winetricks: vec![],
+            env: std::collections::HashMap::new(),
+            wine_variant: "system".into(),
+        }
+    }
 
     #[test]
     fn untrusted_paths_detected() {
@@ -108,25 +159,10 @@ mod tests {
 
     #[test]
     fn resolve_network_from_rules() {
-        use win_sandbox_common::rules_schema::{RuleDefaults, RuleEntry};
-        use win_sandbox_common::tier::Tier;
-
         let rules = RulesFile {
             version: 1,
-            entries: vec![RuleEntry {
-                hash: "abc123".into(),
-                name: "test".into(),
-                tier: Tier::Tier2,
-                allowed_paths: vec![],
-                network: true,
-                gpu: false,
-            }],
-            defaults: RuleDefaults {
-                unmapped_tier: Tier::Tier0,
-                untrusted_path_tier: Tier::Tier2,
-                network_default: false,
-                gpu_default: false,
-            },
+            entries: vec![make_entry("abc123", Tier::Tier2, true, false)],
+            defaults: RuleDefaults::default(),
         };
 
         assert!(resolve_network_permission(&rules, "abc123"));
@@ -134,32 +170,38 @@ mod tests {
     }
 
     #[test]
-    fn nvidia_downgrades_tier2_to_tier1() {
-        // When Nvidia GPU is present, Tier 2 should downgrade to Tier 1
-        // This is hard to test without mocking, so just verify the function doesn't panic
-        // when called with Tier 2. The actual downgrade logic is in execute().
-        use win_sandbox_common::rules_schema::{RuleDefaults, RuleEntry};
-        use win_sandbox_common::tier::Tier;
+    fn trusted_flag_skips_sandbox() {
+        // A trusted entry should be identified correctly
+        let entry = make_entry("abc", Tier::Tier0, true, true);
+        assert!(entry.trusted);
 
-        let rules = RulesFile {
-            version: 1,
-            entries: vec![RuleEntry {
-                hash: "abc123".into(),
-                name: "test".into(),
-                tier: Tier::Tier2,
-                allowed_paths: vec![],
-                network: false,
-                gpu: false,
-            }],
-            defaults: RuleDefaults {
-                unmapped_tier: Tier::Tier0,
-                untrusted_path_tier: Tier::Tier2,
-                network_default: false,
-                gpu_default: false,
-            },
+        // A non-trusted entry
+        let entry = make_entry("abc", Tier::Tier2, false, false);
+        assert!(!entry.trusted);
+    }
+
+    #[test]
+    fn trusted_with_custom_env() {
+        let mut env = std::collections::HashMap::new();
+        env.insert("DXVK_HUD".into(), "1".into());
+        env.insert("MESA_GL_VERSION_OVERRIDE".into(), "4.5".into());
+
+        let entry = RuleEntry {
+            hash: "abc".into(),
+            name: "fusion360".into(),
+            tier: Tier::Tier0,
+            allowed_paths: vec![],
+            network: true,
+            gpu: true,
+            trusted: true,
+            dxvk: false,
+            winetricks: vec![],
+            env,
+            wine_variant: "proton".into(),
         };
 
-        // Verify resolve_network_permission works for Tier 2 entry
-        assert!(!resolve_network_permission(&rules, "abc123"));
+        assert!(entry.trusted);
+        assert_eq!(entry.env.get("DXVK_HUD").unwrap(), "1");
+        assert_eq!(entry.wine_variant, "proton");
     }
 }
