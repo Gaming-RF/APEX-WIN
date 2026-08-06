@@ -26,15 +26,30 @@ fn resolve_network_permission(rules: &RulesFile, hash: &str) -> bool {
 ///
 /// Decision flow:
 ///   1. Look up rule by hash
-///   2. If rule has `trusted: true`, run wine directly (no sandbox, no setup)
-///   3. Otherwise, resolve tier from rule / path trust / defaults
-///   4. Apply nvidia downgrade (Tier 2 → Tier 1)
-///   5. Execute in the resolved tier
+///   2. If matched, ensure Wine prefix exists and install deps (DXVK, winetricks)
+///   3. If `trusted: true`, run wine directly (no sandbox)
+///   4. Otherwise, resolve tier and execute in sandbox
 pub fn execute(args: &Args, hash: &str, rules: &RulesFile) -> Result<ExitCode> {
     let matched_entry = rules::lookup_by_hash(rules, hash);
 
+    // --- Per-app prefix management for matched rules ---
+    if let Some(entry) = &matched_entry {
+        let prefix_mgr = crate::prefix::PrefixManager::new();
+
+        // Ensure prefix exists and install any missing deps
+        let wine_prefix = prefix_mgr.setup_app(
+            hash,
+            entry.dxvk,
+            &entry.winetricks,
+        )?;
+
+        // Set WINEPREFIX for all subsequent wine calls
+        std::env::set_var("WINEPREFIX", &wine_prefix);
+        info!("WINEPREFIX: {}", wine_prefix.display());
+    }
+
     // --- Trusted apps: no sandboxing, just run wine directly ---
-    if let Some(entry) = matched_entry {
+    if let Some(entry) = &matched_entry {
         if entry.trusted {
             info!("Trusted app '{}', no sandboxing", entry.name);
 
@@ -126,12 +141,7 @@ mod tests {
     use super::*;
     use win_sandbox_common::rules_schema::{RuleDefaults, RuleEntry};
 
-    fn make_entry(
-        hash: &str,
-        tier: Tier,
-        network: bool,
-        trusted: bool,
-    ) -> RuleEntry {
+    fn make_entry(hash: &str, tier: Tier, network: bool, trusted: bool) -> RuleEntry {
         RuleEntry {
             hash: hash.into(),
             name: "test".into(),
@@ -171,11 +181,9 @@ mod tests {
 
     #[test]
     fn trusted_flag_skips_sandbox() {
-        // A trusted entry should be identified correctly
         let entry = make_entry("abc", Tier::Tier0, true, true);
         assert!(entry.trusted);
 
-        // A non-trusted entry
         let entry = make_entry("abc", Tier::Tier2, false, false);
         assert!(!entry.trusted);
     }
