@@ -144,7 +144,7 @@ fn main() -> ExitCode {
     }
 
     // Binfmt_misc detection: kernel passes .exe path as positional arg (not --exe).
-    // If daemon is running, route through its FIFO. Otherwise handle directly.
+    // If daemon is running, route through its FIFO with user context. Otherwise handle directly.
     if args.exe.is_none() && !args.args.is_empty() {
         let first = args.args[0].clone();
         if first.ends_with(".exe") || first.ends_with(".EXE") {
@@ -153,7 +153,21 @@ fn main() -> ExitCode {
                 info!("binfmt: routing {first} through daemon FIFO");
                 if let Ok(mut f) = std::fs::OpenOptions::new().write(true).open(&fifo) {
                     use std::io::Write;
+                    // Write exe path + user context for the daemon
                     let _ = writeln!(f, "{first}");
+                    let _ = writeln!(f, "UID:{}", unsafe { libc::getuid() });
+                    // Pass display-critical environment variables
+                    let display_vars = [
+                        "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR",
+                        "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS",
+                        "XDG_SESSION_TYPE", "HOME", "USER",
+                    ];
+                    for var in &display_vars {
+                        if let Ok(val) = std::env::var(var) {
+                            let _ = writeln!(f, "ENV:{var}={val}");
+                        }
+                    }
+                    let _ = writeln!(f); // empty line = end of message
                 }
                 return ExitCode::SUCCESS;
             }

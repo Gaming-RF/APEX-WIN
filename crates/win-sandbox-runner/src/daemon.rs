@@ -400,25 +400,40 @@ pub fn run_daemon() -> Result<()> {
         };
 
         let reader = BufReader::new(fifo);
+        let mut message_lines: Vec<String> = Vec::new();
         for line in reader.lines() {
             match line {
-                Ok(exe_path) => {
-                    let exe_path = exe_path.trim().to_string();
-                    if exe_path.is_empty() {
-                        continue;
-                    }
-
-                    info!("Daemon: intercepted .exe launch: {exe_path}");
-
-                    let state = Arc::clone(&state);
-                    // Spawn a worker thread for each launch
-                    thread::spawn(move || {
-                        if let Err(e) = handle_launch(&exe_path, &state) {
-                            error!("Launch failed for {exe_path}: {e:#}");
+                Ok(text) => {
+                    let text = text.trim().to_string();
+                    if text.is_empty() && !message_lines.is_empty() {
+                        // Empty line = end of message
+                        if let Some(req) = parse_launch_message(&message_lines) {
+                            info!("Daemon: intercepted .exe launch: {}", req.exe_path);
+                            let state = Arc::clone(&state);
+                            thread::spawn(move || {
+                                if let Err(e) = handle_launch(&req, &state) {
+                                    error!("Launch failed for {}: {e:#}", req.exe_path);
+                                }
+                            });
                         }
-                    });
+                        message_lines.clear();
+                    } else {
+                        message_lines.push(text);
+                    }
                 }
                 Err(e) => {
+                    // Writer closed — flush any remaining message
+                    if !message_lines.is_empty() {
+                        if let Some(req) = parse_launch_message(&message_lines) {
+                            info!("Daemon: intercepted .exe launch: {}", req.exe_path);
+                            let state = Arc::clone(&state);
+                            thread::spawn(move || {
+                                if let Err(e) = handle_launch(&req, &state) {
+                                    error!("Launch failed for {}: {e:#}", req.exe_path);
+                                }
+                            });
+                        }
+                    }
                     debug!("FIFO read error (writer closed): {e}");
                     break; // Re-open FIFO
                 }
@@ -434,21 +449,62 @@ pub fn run_daemon() -> Result<()> {
     Ok(())
 }
 
+/// A launch request received via FIFO, including user context.
+#[allow(dead_code)] // uid will be used for per-child UID switching
+struct LaunchRequest {
+    exe_path: String,
+    uid: Option<u32>,
+    env: HashMap<String, String>,
+}
+
+/// Parse a multi-line FIFO message into a LaunchRequest.
+/// Format: exe_path\nUID:1000\nENV:KEY=VAL\n...\n\n
+fn parse_launch_message(lines: &[String]) -> Option<LaunchRequest> {
+    if lines.is_empty() {
+        return None;
+    }
+    let exe_path = lines[0].trim().to_string();
+    if exe_path.is_empty() {
+        return None;
+    }
+    let mut uid = None;
+    let mut env = HashMap::new();
+    for line in &lines[1..] {
+        let line = line.trim();
+        if let Some(uid_str) = line.strip_prefix("UID:") {
+            uid = uid_str.parse().ok();
+        } else if let Some(kv) = line.strip_prefix("ENV:") {
+            if let Some((k, v)) = kv.split_once('=') {
+                env.insert(k.to_string(), v.to_string());
+            }
+        }
+    }
+    Some(LaunchRequest { exe_path, uid, env })
+}
+
 /// Handle a single .exe launch request from the FIFO.
-fn handle_launch(exe_path: &str, state: &Arc<Mutex<DaemonState>>) -> Result<()> {
+fn handle_launch(req: &LaunchRequest, state: &Arc<Mutex<DaemonState>>) -> Result<()> {
     // Update launch stats
     {
         let mut state = state.lock().unwrap();
         state.launch_count += 1;
-        *state.launch_history.entry(exe_path.to_string()).or_insert(0) += 1;
+        *state.launch_history.entry(req.exe_path.clone()).or_insert(0) += 1;
     }
 
+    // Set user environment variables for display access
+    for (k, v) in &req.env {
+        std::env::set_var(k, v);
+    }
+
+    // Note: UID switching happens in the forked child process (inside dispatch::execute)
+    // via pre_exec(), not here — setuid in the daemon would break subsequent launches.
+
     // Hash the binary
-    let hash = hasher::hash_file(exe_path)?;
+    let hash = hasher::hash_file(&req.exe_path)?;
 
     // Build Args for the dispatch
     let args = Args {
-        exe: Some(exe_path.to_string()),
+        exe: Some(req.exe_path.clone()),
         tier: None,
         rules: None,
         verbose: false,
@@ -474,7 +530,7 @@ fn handle_launch(exe_path: &str, state: &Arc<Mutex<DaemonState>>) -> Result<()> 
     // Lock state for dispatch (keeps app_db and rules consistent)
     let state = state.lock().unwrap();
 
-    dispatch::execute(&args, exe_path, &hash, &state.rules, &state.app_db)?;
+    dispatch::execute(&args, &req.exe_path, &hash, &state.rules, &state.app_db)?;
 
     Ok(())
 }
