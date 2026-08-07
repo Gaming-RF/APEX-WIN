@@ -82,9 +82,14 @@ install-binfmt:
 	install -Dm644 binfmt/windows-pe.conf $(DESTDIR)$(BINFMET_DIR)/windows-pe.conf
 
 install-systemd:
-	install -Dm644 systemd/win-tap-bridge.service $(DESTDIR)$(SYSTEMD_DIR)/
-	install -Dm644 systemd/win_tap_filter.service $(DESTDIR)$(SYSTEMD_DIR)/
-	install -Dm644 systemd/win-sandbox-runner.service $(DESTDIR)$(SYSTEMD_DIR)/
+	install -Dm644 scripts/win-sandbox-runner.service $(DESTDIR)$(SYSTEMD_DIR)/win-sandbox-runner.service
+	@if [ -f systemd/win-tap-bridge.service ]; then \
+		install -Dm644 systemd/win-tap-bridge.service $(DESTDIR)$(SYSTEMD_DIR)/; \
+	fi
+	@if [ -f systemd/win_tap_filter.service ]; then \
+		install -Dm644 systemd/win_tap_filter.service $(DESTDIR)$(SYSTEMD_DIR)/; \
+	fi
+	@systemctl daemon-reload 2>/dev/null || true
 
 clean:
 	rm -f csrc/sys_netmp/*.o csrc/sys_netmp/*.dll
@@ -116,20 +121,24 @@ cargo-install: cargo-release install-bridge install-ebpf install-dll install-bin
 	install -m 644 config/rules.schema.json $(DESTDIR)$(CONFDIR)/
 	@# Register binfmt_misc
 	@if [ -d /proc/sys/fs/binfmt_misc ]; then \
-		echo -1 > /proc/sys/fs/binfmt_misc/win-sandbox-runner 2>/dev/null || true; \
-		echo ":win-sandbox-runner:E::exe::$(DESTDIR)$(BINDIR)/win-sandbox-runner:" > /proc/sys/fs/binfmt_misc/register 2>/dev/null && \
-		echo "binfmt_misc handler registered" || \
-		echo "WARN: Failed to register binfmt handler"; \
+		echo -1 > /proc/sys/fs/binfmt_misc/APEX-WIN 2>/dev/null || true; \
+		echo ":APEX-WIN:M:0:\\x4d\\x5a:$(DESTDIR)$(BINDIR)/win-sandbox-runner:CF" > /proc/sys/fs/binfmt_misc/register 2>/dev/null && \
+		echo "binfmt_misc handler registered (.exe -> win-sandbox-runner)" || \
+		echo "WARN: Failed to register binfmt handler (run register-binfmt.sh manually)"; \
 	fi
 	@echo "Installed win-sandbox-runner $(VERSION)"
 
 cargo-uninstall:
-	@if [ -f /proc/sys/fs/binfmt_misc/win-sandbox-runner ]; then \
-		echo -1 > /proc/sys/fs/binfmt_misc/win-sandbox-runner 2>/dev/null || true; \
+	@if [ -f /proc/sys/fs/binfmt_misc/APEX-WIN ]; then \
+		echo -1 > /proc/sys/fs/binfmt_misc/APEX-WIN 2>/dev/null || true; \
 	fi
+	-systemctl stop win-sandbox-runner 2>/dev/null || true
+	-systemctl disable win-sandbox-runner 2>/dev/null || true
+	rm -f /etc/systemd/system/win-sandbox-runner.service
 	rm -f $(DESTDIR)$(BINDIR)/win-sandbox-runner
 	rm -f $(DESTDIR)$(BINDIR)/win-sandbox-gui
 	rm -rf $(DESTDIR)$(CONFDIR)
+	@systemctl daemon-reload 2>/dev/null || true
 	@echo "Removed. User config at ~/.config/win-sandbox/ preserved."
 
 deb: cargo-release
