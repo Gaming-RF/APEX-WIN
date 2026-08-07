@@ -14,6 +14,10 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=win-sandbox
 
+# Runtime directory (systemd creates /run/win-sandbox-runner before ExecStart)
+RuntimeDirectory=win-sandbox-runner
+RuntimeDirectoryMode=1777
+
 # Security hardening
 ProtectSystem=strict
 ReadWritePaths=/run/win-sandbox-runner /tmp

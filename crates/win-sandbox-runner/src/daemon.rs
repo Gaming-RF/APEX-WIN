@@ -244,8 +244,9 @@ fn spawn_ipc_listener(
             match listener.accept() {
                 Ok((stream, _)) => {
                     let state = Arc::clone(&state);
+                    let shutdown = Arc::clone(&shutdown);
                     thread::spawn(move || {
-                        if let Err(e) = handle_ipc_command(stream, &state) {
+                        if let Err(e) = handle_ipc_command(stream, &state, &shutdown) {
                             debug!("IPC command error: {e}");
                         }
                     });
@@ -266,7 +267,11 @@ fn spawn_ipc_listener(
 }
 
 /// Handle a single IPC command.
-fn handle_ipc_command(mut stream: UnixStream, state: &Arc<Mutex<DaemonState>>) -> Result<()> {
+fn handle_ipc_command(
+    mut stream: UnixStream,
+    state: &Arc<Mutex<DaemonState>>,
+    shutdown: &Arc<Mutex<bool>>,
+) -> Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut line = String::new();
     reader.read_line(&mut line)?;
@@ -304,9 +309,7 @@ fn handle_ipc_command(mut stream: UnixStream, state: &Arc<Mutex<DaemonState>>) -
     stream.flush()?;
 
     if cmd == "quit" {
-        // Write a sentinel to a shutdown file that the main loop can check
-        let shutdown_file = Path::new("/run/win-sandbox-runner/shutdown");
-        let _ = std::fs::write(shutdown_file, "1");
+        *shutdown.lock().unwrap() = true;
     }
 
     Ok(())
@@ -367,9 +370,25 @@ pub fn run_daemon() -> Result<()> {
 
     // 7. Main loop: read exe paths from FIFO, dispatch each one
     loop {
-        // Open FIFO for reading (blocks until a writer opens it)
-        let fifo = match std::fs::File::open(fifo_path()) {
+        // Check shutdown flag
+        if *shutdown.lock().unwrap() {
+            info!("Daemon shutting down...");
+            break;
+        }
+
+        // Open FIFO for reading (non-blocking so we can check shutdown)
+        use std::os::unix::fs::OpenOptionsExt;
+        let fifo = match std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(fifo_path())
+        {
             Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // No writer yet, sleep and retry
+                thread::sleep(std::time::Duration::from_millis(200));
+                continue;
+            }
             Err(e) => {
                 error!("Failed to open FIFO: {e}");
                 thread::sleep(std::time::Duration::from_secs(1));
@@ -403,6 +422,13 @@ pub fn run_daemon() -> Result<()> {
             }
         }
     }
+
+    // Cleanup on graceful shutdown
+    info!("Cleaning up...");
+    unregister_binfmt().ok();
+    cleanup_runtime();
+    info!("APEX-WIN daemon stopped.");
+    Ok(())
 }
 
 /// Handle a single .exe launch request from the FIFO.
