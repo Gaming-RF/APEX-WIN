@@ -1,7 +1,7 @@
 # Top-level Makefile — builds C components, eBPF, and Rust crates
 # Requires: gcc, mingw-w64, clang, libbpf-dev, linux-headers, cargo
 
-PREFIX ?= /usr/local
+PREFIX ?= /usr
 BINDIR ?= $(PREFIX)/bin
 LIBDIR ?= $(PREFIX)/lib
 CONFDIR ?= /etc/win-sandbox-runner
