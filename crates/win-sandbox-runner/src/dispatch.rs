@@ -33,6 +33,7 @@ fn resolve_network_permission(rules: &RulesFile, hash: &str) -> bool {
 ///   6. Otherwise, resolve tier and execute in sandbox
 pub fn execute(
     args: &Args,
+    exe: &str,
     hash: &str,
     rules: &RulesFile,
     app_db: &appdb::AppDatabase,
@@ -43,10 +44,10 @@ pub fn execute(
 
     // --- Step 2: Name-based match in app database ---
     if matched_entry.is_none() {
-        if let Some((profile, entry)) = app_db.lookup_by_name(&args.exe) {
+        if let Some((profile, entry)) = app_db.lookup_by_name(exe) {
             info!(
                 "App database match: '{}' -> '{}'",
-                std::path::Path::new(&args.exe)
+                std::path::Path::new(exe)
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("?"),
@@ -61,7 +62,7 @@ pub fn execute(
 
     // --- Step 3: First-launch wizard for unknown apps ---
     if matched_entry.is_none() {
-        let result = wizard::run_wizard(&args.exe, app_db, args.no_gui, hash);
+        let result = wizard::run_wizard(exe, app_db, args.no_gui, hash);
         info!("First launch: {}", wizard::describe_decision(&result));
         matched_entry = Some(result.entry);
     }
@@ -96,9 +97,9 @@ pub fn execute(
     } else if let Some(ref entry) = matched_entry {
         info!("Matched rule '{}', tier: {}", entry.name, entry.tier);
         entry.tier
-    } else if is_untrusted_path(&args.exe) {
+    } else if is_untrusted_path(exe) {
         let t = rules.defaults.untrusted_path_tier;
-        warn!("Untrusted path '{}', using tier {t}", args.exe);
+        warn!("Untrusted path '{}', using tier {t}", exe);
         t
     } else {
         let t = rules.defaults.unmapped_tier;
@@ -111,8 +112,7 @@ pub fn execute(
 
     if args.dry_run {
         info!(
-            "[DRY RUN] Would execute tier {tier} for {} (network={network})",
-            args.exe
+            "[DRY RUN] Would execute tier {tier} for {exe} (network={network})",
         );
         return Ok(ExitCode::SUCCESS);
     }
@@ -130,7 +130,7 @@ pub fn execute(
         .map(|e| e.env.clone())
         .unwrap_or_default();
 
-    info!("Executing tier {tier} for {}", args.exe);
+    info!("Executing tier {tier} for {exe}");
 
     match tier {
         Tier::Tier0 => crate::tier0::run_with_env(args, &app_env),

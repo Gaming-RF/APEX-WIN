@@ -28,8 +28,9 @@ use tracing::{debug, info, warn};
 #[command(name = "win-sandbox-runner", version, about)]
 struct Args {
     /// Path to the Windows executable (.exe).
+    /// Required for running apps; not needed for --optimize-net/--cleanup-net/--configure-net.
     #[arg(short, long)]
-    exe: String,
+    exe: Option<String>,
 
     /// Force a specific tier (0–3), overriding rules.json.
     #[arg(short, long)]
@@ -110,7 +111,14 @@ fn main() -> ExitCode {
     // Recursion guard: if WIN_SANDBOX_ACTIVE is already set, pass through to wine.
     if std::env::var("WIN_SANDBOX_ACTIVE").is_ok() {
         info!("Recursion guard active, passing through to wine");
-        return dispatch::passthrough_to_wine(&args.exe, &args.args);
+        let exe = match &args.exe {
+            Some(e) => e.as_str(),
+            None => {
+                tracing::error!("Recursion guard active but no --exe provided");
+                return ExitCode::FAILURE;
+            }
+        };
+        return dispatch::passthrough_to_wine(exe, &args.args);
     }
 
     match run(&args) {
@@ -144,13 +152,22 @@ fn run(args: &Args) -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
 
+    // From here on, --exe is required
+    let exe = match &args.exe {
+        Some(e) => e.clone(),
+        None => {
+            tracing::error!("--exe is required for running applications");
+            return Ok(ExitCode::FAILURE);
+        }
+    };
+
     // Check Wine version before proceeding
     if let Err(e) = check_wine_version() {
         warn!("Wine version check failed: {e}");
     }
 
     // Hash the binary
-    let hash = hasher::hash_file(&args.exe)?;
+    let hash = hasher::hash_file(&exe)?;
     info!("Binary hash: {hash}");
 
     // Load rules
@@ -162,11 +179,11 @@ fn run(args: &Args) -> Result<ExitCode> {
 
     // --trust flag: save this app as trusted in rules.json
     if args.trust {
-        save_trusted_rule(&args.exe, &hash)?;
+        save_trusted_rule(&exe, &hash)?;
     }
 
     // Auto-apply network optimization for game profiles
-    if let Some((profile, _)) = app_db.lookup_by_name(&args.exe) {
+    if let Some((profile, _)) = app_db.lookup_by_name(&exe) {
         if profile.network && profile.gpu {
             // This looks like a game — auto-optimize network
             let net_config = netopt::load_config(None);
@@ -185,7 +202,7 @@ fn run(args: &Args) -> Result<ExitCode> {
     }
 
     // Dispatch to the appropriate tier
-    dispatch::execute(args, &hash, &rules, &app_db)
+    dispatch::execute(args, &exe, &hash, &rules, &app_db)
 }
 
 /// Check Wine version and warn if < 9.0.

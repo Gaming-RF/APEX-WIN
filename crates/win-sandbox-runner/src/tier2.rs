@@ -21,7 +21,8 @@ pub fn run(args: &Args) -> Result<ExitCode> {
 /// its Unix socket + sys_netmp.dll into the container for isolated
 /// Wine networking. When false, the container runs without network.
 pub fn run_with_network(args: &Args, network: bool) -> Result<ExitCode> {
-    info!("Tier 2: Bubblewrap container for {} (network={network})", args.exe);
+    let exe = args.exe.as_deref().unwrap();
+    info!("Tier 2: Bubblewrap container for {exe} (network={network})");
 
     let config = crate::config::load_config(None);
 
@@ -91,7 +92,7 @@ pub fn run_with_network(args: &Args, network: bool) -> Result<ExitCode> {
     }
 
     // The executable's directory: bind RW
-    if let Some(parent) = exe_parent_dir(&args.exe) {
+    if let Some(parent) = exe_parent_dir(exe) {
         cmd.args(["--bind", parent, parent]);
     }
 
@@ -141,10 +142,10 @@ pub fn run_with_network(args: &Args, network: bool) -> Result<ExitCode> {
 
     // The command to run inside the sandbox
     cmd.args(["--", "wine"]);
-    cmd.arg(&args.exe);
+    cmd.arg(exe);
     cmd.args(&args.args);
 
-    info!("Executing bwrap for {}", args.exe);
+    info!("Executing bwrap for {exe}");
 
     let err = cmd.exec();
     bail!("Failed to exec bwrap: {err}");

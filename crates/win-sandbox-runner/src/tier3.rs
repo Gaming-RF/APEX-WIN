@@ -18,7 +18,8 @@ pub fn run(args: &Args) -> Result<ExitCode> {
 /// When `network` is true, starts the TAP bridge and sets up Wine DLL
 /// environment for isolated networking through the overlay.
 pub fn run_with_network(args: &Args, network: bool) -> Result<ExitCode> {
-    info!("Tier 3: OverlayFS ephemeral sandbox for {} (network={network})", args.exe);
+    let exe = args.exe.as_deref().unwrap();
+    info!("Tier 3: OverlayFS ephemeral sandbox for {exe} (network={network})");
 
     let config = crate::config::load_config(None);
     let pid = std::process::id();
@@ -79,7 +80,7 @@ pub fn run_with_network(args: &Args, network: bool) -> Result<ExitCode> {
 
     let sandbox_env = crate::env_sanitize::build_sandbox_env(&config)?;
     let mut cmd = Command::new("wine");
-    cmd.arg(&args.exe).args(&args.args);
+    cmd.arg(exe).args(&args.args);
     cmd.env_clear();
     for (key, val) in &sandbox_env {
         cmd.env(key, val);

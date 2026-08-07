@@ -20,13 +20,14 @@ pub fn run_with_env(
     args: &Args,
     app_env: &std::collections::HashMap<String, String>,
 ) -> Result<ExitCode> {
-    info!("Tier 0: Direct wine execution for {}", args.exe);
+    let exe = args.exe.as_deref().unwrap();
+    info!("Tier 0: Direct wine execution for {exe}");
 
     let config = crate::config::load_config(None);
     let sandbox_env = crate::env_sanitize::build_sandbox_env(&config)?;
 
     let mut cmd = Command::new("wine");
-    cmd.arg(&args.exe);
+    cmd.arg(exe);
     cmd.args(&args.args);
 
     // Clear inherited environment and apply only sanitized vars

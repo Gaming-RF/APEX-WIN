@@ -18,7 +18,8 @@ use tracing::{info, warn};
 /// ports. For network isolation, use Tier 2 (bwrap with --unshare-net) or Tier 3.
 /// Network restriction is NOT part of Tier 1.
 pub fn run(args: &Args) -> Result<ExitCode> {
-    info!("Tier 1: Landlock sandbox for {}", args.exe);
+    let exe = args.exe.as_deref().unwrap();
+    info!("Tier 1: Landlock sandbox for {exe}");
 
     let config = crate::config::load_config(None);
     let abi = detect_landlock_abi()?;
@@ -60,7 +61,7 @@ pub fn run(args: &Args) -> Result<ExitCode> {
     info!("Launching wine in Landlock sandbox");
     let sandbox_env = crate::env_sanitize::build_sandbox_env(&config)?;
     let mut cmd = Command::new("wine");
-    cmd.arg(&args.exe).args(&args.args);
+    cmd.arg(exe).args(&args.args);
     cmd.env_clear();
     for (key, val) in &sandbox_env {
         cmd.env(key, val);
@@ -98,7 +99,7 @@ fn build_ro_paths(wine_prefix: &str, args: &Args) -> Vec<String> {
         wine_prefix.to_string(),
     ];
 
-    if let Some(parent) = std::path::Path::new(&args.exe).parent() {
+    if let Some(parent) = std::path::Path::new(args.exe.as_deref().unwrap()).parent() {
         let parent_str = parent.to_string_lossy().to_string();
         if !paths.contains(&parent_str) && !parent_str.is_empty() && parent_str != "/" {
             paths.push(parent_str);
@@ -135,7 +136,7 @@ mod tests {
     #[test]
     fn ro_paths_include_system() {
         let args = Args {
-            exe: "/home/test/game.exe".into(),
+            exe: Some("/home/test/game.exe".into()),
             tier: None,
             rules: None,
             verbose: false,
@@ -162,7 +163,7 @@ mod tests {
     #[test]
     fn ro_paths_exclude_root() {
         let args = Args {
-            exe: "/game.exe".into(),
+            exe: Some("/game.exe".into()),
             tier: None,
             rules: None,
             verbose: false,
