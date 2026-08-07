@@ -103,8 +103,7 @@ cargo:
 
 cargo-release:
 	@if grep -q '^version = 4' Cargo.lock 2>/dev/null; then \
-		echo "WARN: Cargo.lock is v4 (nightly format), regenerating for stable Rust..."; \
-		cargo generate-lockfile; \
+		echo "WARN: Cargo.lock is v4 (nightly format), downgrading to v3..."; \
 		sed -i 's/^version = 4$$/version = 3/' Cargo.lock; \
 	fi
 	cargo build --release --workspace
