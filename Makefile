@@ -115,18 +115,21 @@ cargo-clippy:
 	cargo clippy --workspace -- -D warnings
 
 # Quick install: Rust binaries + systemd service + binfmt (no C components)
-quick-install: cargo-release install-systemd
-	install -Dm755 target/release/win-sandbox-runner $(DESTDIR)$(BINDIR)/win-sandbox-runner
-	install -Dm755 target/release/win-sandbox-gui $(DESTDIR)$(BINDIR)/win-sandbox-gui
-	install -Dm644 scripts/register-binfmt.sh $(DESTDIR)$(BINDIR)/register-binfmt.sh
+# Build runs as current user (cargo), install steps use sudo internally.
+quick-install: cargo-release
+	@echo "Installing binaries and service (requires sudo)..."
+	@sudo install -Dm755 target/release/win-sandbox-runner $(BINDIR)/win-sandbox-runner
+	@sudo install -Dm755 target/release/win-sandbox-gui $(BINDIR)/win-sandbox-gui
+	@sudo install -Dm644 scripts/register-binfmt.sh $(BINDIR)/register-binfmt.sh
+	@sudo install -Dm644 scripts/win-sandbox-runner.service /etc/systemd/system/win-sandbox-runner.service
 	@# Register binfmt_misc
 	@if [ -d /proc/sys/fs/binfmt_misc ]; then \
-		echo -1 > /proc/sys/fs/binfmt_misc/APEX-WIN 2>/dev/null || true; \
-		echo ":APEX-WIN:M:0:\\x4d\\x5a:$(DESTDIR)$(BINDIR)/win-sandbox-runner:CF" > /proc/sys/fs/binfmt_misc/register 2>/dev/null && \
+		echo -1 | sudo tee /proc/sys/fs/binfmt_misc/APEX-WIN > /dev/null 2>&1 || true; \
+		echo ":APEX-WIN:M:0:\\x4d\\x5a:$(BINDIR)/win-sandbox-runner:CF" | sudo tee /proc/sys/fs/binfmt_misc/register > /dev/null 2>&1 && \
 		echo "✓ binfmt_misc registered (.exe -> win-sandbox-runner)" || \
 		echo "WARN: Failed to register binfmt handler"; \
 	fi
-	@systemctl daemon-reload 2>/dev/null || true
+	@sudo systemctl daemon-reload
 	@echo ""
 	@echo "✓ Installed! Start the daemon:"
 	@echo "  sudo systemctl enable --now win-sandbox-runner"
