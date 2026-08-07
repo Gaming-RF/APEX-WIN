@@ -124,6 +124,12 @@ win-sandbox-runner --exe app.exe --dry-run
 
 # Launch the GUI
 win-sandbox-gui
+
+# Optimize network for gaming (applied automatically for game profiles)
+sudo win-sandbox-runner --optimize-net
+
+# Clean up network optimizations
+sudo win-sandbox-runner --cleanup-net
 ```
 
 The built-in app database (`config/appdb.json`) contains 30+ known app profiles with recommended settings for Fusion 360, Steam, Office, Unity, Unreal, popular games, and more.
@@ -147,6 +153,42 @@ Wine process (in bwrap)
 ```
 
 The bridge daemon allocates a TAP device and bridges Ethernet frames between Wine (via named pipe) and the host network. An optional eBPF TC classifier marks UDP packets with DSCP EF for QoS.
+
+### Network Optimizer (Gaming)
+
+Replaces Windows tools like Gear Up Booster with native Linux network tuning. Automatically applied when launching game profiles from the app database.
+
+```bash
+# Apply all optimizations (requires root)
+sudo win-sandbox-runner --optimize-net
+
+# Remove all applied optimizations
+sudo win-sandbox-runner --cleanup-net
+```
+
+What it does:
+- **BBR congestion control** — Google's algorithm, reduces bufferbloat
+- **fq_codel SQM** — 5ms target latency, smart packet scheduling
+- **Socket buffers** — 16MB for high-PPS game traffic, 50μs busy poll
+- **DSCP marking** — marks game packets (Steam, Xbox, PSN, Blizzard ports) as priority
+- **TCP tweaks** — fast open, no slow start after idle, MTU probing
+
+Configure via `~/.config/win-sandbox/net-optimizer.json`:
+
+```json
+{
+  "bbr": true,
+  "sqm": true,
+  "socket_buffers": true,
+  "dscp_marking": true,
+  "tcp_tweaks": true,
+  "game_ports": [27015, 3478, 3074, 6112],
+  "download_mbps": 100,
+  "upload_mbps": 50
+}
+```
+
+Set `download_mbps` / `upload_mbps` to your actual connection speed for optimal SQM shaping. Leave at 0 for auto (1 Gbit/s default).
 
 ## Rules Configuration
 

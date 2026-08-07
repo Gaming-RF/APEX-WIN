@@ -447,6 +447,103 @@ fn run_cmd(cmd: &str, args: &[&str]) -> Result<()> {
     }
 }
 
+/// Run network diagnostics and write a tuned config file.
+pub fn diagnose_and_configure() -> Result<()> {
+    use std::io::Write;
+
+    println!("=== Network Diagnostics ===\n");
+
+    // 1. Check BBR availability
+    let bbr_available = read_proc("/proc/sys/net/ipv4/tcp_available_congestion_control")
+        .map(|s| s.contains("bbr"))
+        .unwrap_or(false);
+    let current_congestion = read_proc("/proc/sys/net/ipv4/tcp_congestion_control")
+        .unwrap_or_else(|_| "unknown".into());
+    println!("BBR available:   {}", if bbr_available { "yes" } else { "no" });
+    println!("Current CC:      {current_congestion}");
+
+    // 2. Check current qdisc on default interface
+    match get_default_interface() {
+        Ok(iface) => {
+            println!("Default iface:   {iface}");
+            // Show current qdisc
+            let output = std::process::Command::new("tc")
+                .args(["qdisc", "show", "dev", &iface])
+                .output();
+            if let Ok(out) = output {
+                let qdisc = String::from_utf8_lossy(&out.stdout);
+                for line in qdisc.lines().take(2) {
+                    println!("Current qdisc:   {}", line.trim());
+                }
+            }
+        }
+        Err(e) => {
+            println!("Default iface:   could not detect ({e})");
+        }
+    }
+
+    // 3. Check socket buffer sizes
+    let rmem_max = read_proc("/proc/sys/net/core/rmem_max").unwrap_or_default();
+    let wmem_max = read_proc("/proc/sys/net/core/wmem_max").unwrap_or_default();
+    println!("Max recv buf:    {rmem_max} bytes");
+    println!("Max send buf:    {wmem_max} bytes");
+
+    // 4. Check busy poll
+    let busy_read = read_proc("/proc/sys/net/core/busy_read").unwrap_or_default();
+    println!("Busy poll:       {busy_read} μs");
+
+    // 5. Check tcp_fastopen
+    let fastopen = read_proc("/proc/sys/net/ipv4/tcp_fastopen").unwrap_or_default();
+    println!("TCP fast open:   {fastopen}");
+
+    // 6. Check kernel version for NTsync / BBR2 support
+    if let Ok(ver) = read_proc("/proc/sys/kernel/osrelease") {
+        println!("Kernel:          {ver}");
+    }
+
+    // 7. Check if tc and iptables are available
+    let tc_ok = std::process::Command::new("tc")
+        .args(["-Version"])
+        .output()
+        .is_ok();
+    let ipt_ok = std::process::Command::new("iptables")
+        .args(["--version"])
+        .output()
+        .is_ok();
+    println!("tc available:    {tc_ok}");
+    println!("iptables avail:  {ipt_ok}");
+
+    println!("\n=== Generating Config ===\n");
+
+    // Generate config with sensible defaults
+    let config = NetOptimizerConfig {
+        bbr: bbr_available,
+        sqm: tc_ok,
+        socket_buffers: true,
+        dscp_marking: ipt_ok,
+        tcp_tweaks: true,
+        game_ports: default_game_ports(),
+        download_mbps: 0,
+        upload_mbps: 0,
+    };
+
+    // Write config file
+    let config_path = expand_tilde("~/.config/win-sandbox/net-optimizer.json");
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let json = serde_json::to_string_pretty(&config)?;
+    let mut file = std::fs::File::create(&config_path)?;
+    file.write_all(json.as_bytes())?;
+
+    println!("Config written to: {}", config_path.display());
+    println!("\nEdit the file to set download_mbps/upload_mbps to your actual speed,");
+    println!("then run: sudo win-sandbox-runner --optimize-net");
+
+    Ok(())
+}
+
 /// Load config from file or use defaults.
 pub fn load_config(path: Option<&str>) -> NetOptimizerConfig {
     if let Some(p) = path {

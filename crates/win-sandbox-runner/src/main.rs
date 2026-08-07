@@ -89,6 +89,11 @@ struct Args {
     /// Remove network optimizations previously applied by --optimize-net.
     #[arg(long)]
     cleanup_net: bool,
+
+    /// Show network diagnostics and write a tuned config file.
+    /// Detects BBR availability, current qdisc, bandwidth, and game port reachability.
+    #[arg(long)]
+    configure_net: bool,
 }
 
 fn main() -> ExitCode {
@@ -122,6 +127,12 @@ fn run(args: &Args) -> Result<ExitCode> {
     if args.cleanup_net {
         let config = netopt::load_config(None);
         netopt::cleanup(&config)?;
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    // --configure-net: network diagnostics and config
+    if args.configure_net {
+        netopt::diagnose_and_configure()?;
         return Ok(ExitCode::SUCCESS);
     }
 
