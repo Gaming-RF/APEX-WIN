@@ -120,7 +120,7 @@ struct Args {
 }
 
 fn main() -> ExitCode {
-    let args = Args::parse();
+    let mut args = Args::parse();
 
     // Initialize logging.
     let filter = if args.verbose {
@@ -141,6 +141,26 @@ fn main() -> ExitCode {
             }
         };
         return dispatch::passthrough_to_wine(exe, &args.args);
+    }
+
+    // Binfmt_misc detection: kernel passes .exe path as positional arg (not --exe).
+    // If daemon is running, route through its FIFO. Otherwise handle directly.
+    if args.exe.is_none() && !args.args.is_empty() {
+        let first = args.args[0].clone();
+        if first.ends_with(".exe") || first.ends_with(".EXE") {
+            let fifo = std::path::PathBuf::from("/run/win-sandbox-runner/fifo");
+            if fifo.exists() {
+                info!("binfmt: routing {first} through daemon FIFO");
+                if let Ok(mut f) = std::fs::OpenOptions::new().write(true).open(&fifo) {
+                    use std::io::Write;
+                    let _ = writeln!(f, "{first}");
+                }
+                return ExitCode::SUCCESS;
+            }
+            info!("binfmt: handling {first} directly (no daemon)");
+            args.exe = Some(first);
+            args.args.remove(0);
+        }
     }
 
     match run(&args) {
