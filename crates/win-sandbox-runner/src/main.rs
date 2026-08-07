@@ -16,6 +16,7 @@ mod tier0;
 mod tier1;
 mod tier2;
 mod tier3;
+mod daemon;
 mod wizard;
 
 use anyhow::Result;
@@ -95,6 +96,27 @@ struct Args {
     /// Detects BBR availability, current qdisc, bandwidth, and game port reachability.
     #[arg(long)]
     configure_net: bool,
+
+    /// Start as a background daemon with binfmt_misc interception.
+    /// Pre-loads app database and rules for instant .exe execution.
+    #[arg(long)]
+    daemon: bool,
+
+    /// Query the running daemon status (connects via IPC socket).
+    #[arg(long)]
+    status: bool,
+
+    /// Reload rules and config in the running daemon (connects via IPC socket).
+    #[arg(long)]
+    reload: bool,
+
+    /// Stop the running daemon gracefully.
+    #[arg(long)]
+    stop: bool,
+
+    /// Unregister the binfmt_misc handler (cleanup before uninstall).
+    #[arg(long)]
+    unregister: bool,
 }
 
 fn main() -> ExitCode {
@@ -131,6 +153,59 @@ fn main() -> ExitCode {
 }
 
 fn run(args: &Args) -> Result<ExitCode> {
+    // --daemon: start background daemon
+    if args.daemon {
+        return daemon::run_daemon().map(|_| ExitCode::SUCCESS);
+    }
+
+    // --status: query daemon
+    if args.status {
+        match daemon::query_status() {
+            Ok(status) => {
+                println!("{status}");
+                return Ok(ExitCode::SUCCESS);
+            }
+            Err(e) => {
+                eprintln!("Daemon not running: {e}");
+                return Ok(ExitCode::FAILURE);
+            }
+        }
+    }
+
+    // --reload: reload daemon rules
+    if args.reload {
+        match daemon::send_command("reload") {
+            Ok(resp) => {
+                println!("{resp}");
+                return Ok(ExitCode::SUCCESS);
+            }
+            Err(e) => {
+                eprintln!("Daemon not running: {e}");
+                return Ok(ExitCode::FAILURE);
+            }
+        }
+    }
+
+    // --stop: stop daemon
+    if args.stop {
+        match daemon::send_command("quit") {
+            Ok(resp) => {
+                println!("{resp}");
+                return Ok(ExitCode::SUCCESS);
+            }
+            Err(e) => {
+                eprintln!("Daemon not running: {e}");
+                return Ok(ExitCode::FAILURE);
+            }
+        }
+    }
+
+    // --unregister: remove binfmt handler
+    if args.unregister {
+        daemon::unregister_binfmt()?;
+        return Ok(ExitCode::SUCCESS);
+    }
+
     // --cleanup-net: remove network optimizations and exit
     if args.cleanup_net {
         let config = netopt::load_config(None);

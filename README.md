@@ -107,7 +107,35 @@ sudo win-sandbox-uninstall  # if installed via install.sh
 
 ## Quick Start
 
-After installation, just double-click any `.exe` file — it will run through Wine with automatic sandboxing.
+### Background Mode (recommended)
+
+After installation, enable the daemon for seamless .exe execution:
+
+```bash
+# Start the daemon (registers binfmt_misc + loads app database)
+sudo systemctl enable --now win-sandbox-runner
+
+# Now just run any .exe — it's intercepted automatically
+/path/to/program.exe
+
+# Check daemon status
+win-sandbox-runner --status
+
+# Reload rules after editing
+win-sandbox-runner --reload
+
+# Stop the daemon
+sudo systemctl stop win-sandbox-runner
+```
+
+The daemon:
+- Registers a **binfmt_misc** handler for .exe files (MZ header detection)
+- Pre-loads the app database (35+ profiles) and rules into memory
+- Applies network optimizations on startup (if configured)
+- Exposes an IPC socket for runtime control (`--status`, `--reload`, `--stop`)
+- Runs as a systemd service with auto-restart on failure
+
+### Manual Mode
 
 ```bash
 # Run an app (auto-detected tier)

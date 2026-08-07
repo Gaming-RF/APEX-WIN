@@ -1,0 +1,26 @@
+[Unit]
+Description=APEX-WIN Background Daemon — transparent Windows .exe execution via Wine
+Documentation=https://github.com/Gaming-RF/APEX-WIN
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/win-sandbox-runner --daemon
+ExecStop=/usr/bin/win-sandbox-runner --stop
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=win-sandbox
+
+# Security hardening
+ProtectSystem=strict
+ReadWritePaths=/run/win-sandbox-runner /tmp
+PrivateTmp=yes
+NoNewPrivileges=no
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_NET_RAW CAP_DAC_OVERRIDE
+AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_NET_RAW CAP_DAC_OVERRIDE
+
+[Install]
+WantedBy=multi-user.target

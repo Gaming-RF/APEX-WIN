@@ -152,6 +152,11 @@ mod tests {
             optimize_net: false,
             cleanup_net: false,
             configure_net: false,
+            daemon: false,
+            status: false,
+            reload: false,
+            stop: false,
+            unregister: false,
         };
         let paths = build_ro_paths("/home/test/.wine", &args);
         assert!(paths.contains(&"/usr".to_string()));
@@ -179,6 +184,11 @@ mod tests {
             optimize_net: false,
             cleanup_net: false,
             configure_net: false,
+            daemon: false,
+            status: false,
+            reload: false,
+            stop: false,
+            unregister: false,
         };
         let paths = build_ro_paths("/tmp/.wine", &args);
         // "/" must NOT be in ro_paths (would grant read to entire root)

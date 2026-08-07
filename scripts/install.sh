@@ -127,13 +127,20 @@ install_config() {
 install_binfmt() {
     info "Installing binfmt handler..."
     install -Dm644 binfmt/windows-pe.conf "${DESTDIR:-}${BINFMET_DIR}/windows-pe.conf"
+    # Also register via binfmt_misc directly (more reliable)
+    if [[ -d /proc/sys/fs/binfmt_misc ]]; then
+        bash scripts/register-binfmt.sh
+    fi
 }
 
 install_systemd() {
     info "Installing systemd units..."
-    install -Dm644 systemd/win-sandbox-runner.service "${DESTDIR:-}${SYSTEMD_DIR}/"
-    install -Dm644 systemd/win-tap-bridge.service "${DESTDIR:-}${SYSTEMD_DIR}/"
-    install -Dm644 systemd/win_tap_filter.service "${DESTDIR:-}${SYSTEMD_DIR}/"
+    install -Dm644 scripts/win-sandbox-runner.service "${DESTDIR:-}${SYSTEMD_DIR}/"
+    # Also install legacy service files if they exist
+    [[ -f systemd/win-tap-bridge.service ]] && install -Dm644 systemd/win-tap-bridge.service "${DESTDIR:-}${SYSTEMD_DIR}/"
+    [[ -f systemd/win_tap_filter.service ]] && install -Dm644 systemd/win_tap_filter.service "${DESTDIR:-}${SYSTEMD_DIR}/"
+    # Reload systemd to pick up new service
+    systemctl daemon-reload 2>/dev/null || true
 }
 
 # --- Main ---
@@ -159,12 +166,23 @@ main() {
     echo ""
     info "Installation complete!"
     echo ""
-    echo "Next steps:"
-    echo "  1. Register the binfmt handler:  systemctl start win-sandbox-runner"
-    echo "  2. (Optional) Start TAP bridge:  systemctl start win-tap-bridge"
-    echo "  3. (Optional) Load eBPF filter:  systemctl start win_tap_filter"
-    echo "  4. Edit rules:                   /etc/win-sandbox-runner/rules.json"
-    echo "  5. Run a .exe:                   wine program.exe"
+    echo "Quick start (background mode):"
+    echo "  sudo systemctl enable --now win-sandbox-runner   # Start daemon + binfmt"
+    echo "  /path/to/app.exe                                 # Run any .exe transparently"
+    echo ""
+    echo "Manual mode (no daemon):"
+    echo "  win-sandbox-runner --exe app.exe                 # Run an app directly"
+    echo "  sudo win-sandbox-runner --optimize-net            # Optimize network for gaming"
+    echo ""
+    echo "Daemon management:"
+    echo "  win-sandbox-runner --status                       # Check daemon status"
+    echo "  win-sandbox-runner --reload                       # Reload rules"
+    echo "  sudo systemctl stop win-sandbox-runner            # Stop daemon"
+    echo ""
+    echo "Configuration:"
+    echo "  /etc/win-sandbox-runner/rules.json                # Sandbox rules"
+    echo "  ~/.config/win-sandbox/rules.json                  # User rules"
+    echo "  ~/.config/win-sandbox/net-optimizer.json           # Network tuning"
     echo ""
 }
 
