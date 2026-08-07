@@ -19,12 +19,8 @@ RuntimeDirectory=win-sandbox-runner
 RuntimeDirectoryMode=1777
 
 # Security hardening
-ProtectSystem=strict
+ProtectHome=read-only
 ReadWritePaths=/run/win-sandbox-runner /tmp
-PrivateTmp=yes
-NoNewPrivileges=no
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_NET_RAW CAP_DAC_OVERRIDE
-AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_NET_RAW CAP_DAC_OVERRIDE
 
 [Install]
 WantedBy=multi-user.target
