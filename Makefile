@@ -117,6 +117,9 @@ cargo-clippy:
 # Quick install: Rust binaries + systemd service + binfmt (no C components)
 # Build runs as current user (cargo), install steps use sudo internally.
 quick-install: cargo-release
+	@# Clean up any old installs from wrong paths
+	@sudo systemctl stop win-sandbox-runner 2>/dev/null || true
+	@sudo rm -f /usr/local/bin/win-sandbox-runner /usr/local/bin/win-sandbox-gui 2>/dev/null || true
 	@echo "Installing binaries and service (requires sudo)..."
 	@sudo install -Dm755 target/release/win-sandbox-runner $(BINDIR)/win-sandbox-runner
 	@sudo install -Dm755 target/release/win-sandbox-gui $(BINDIR)/win-sandbox-gui
