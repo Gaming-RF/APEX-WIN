@@ -125,6 +125,11 @@ quick-install: cargo-release
 	@sudo install -Dm755 target/release/win-sandbox-gui $(BINDIR)/win-sandbox-gui
 	@sudo install -Dm644 scripts/register-binfmt.sh $(BINDIR)/register-binfmt.sh
 	@sudo install -Dm644 scripts/win-sandbox-runner.service /etc/systemd/system/win-sandbox-runner.service
+	@# Install config files
+	@sudo mkdir -p /etc/win-sandbox-runner
+	@sudo install -m 644 config/appdb.json /etc/win-sandbox-runner/appdb.json
+	@sudo install -m 644 config/rules.json /etc/win-sandbox-runner/rules.json
+	@sudo install -m 644 config/net-optimizer.json /etc/win-sandbox-runner/net-optimizer.json
 	@# Register binfmt_misc
 	@if [ -d /proc/sys/fs/binfmt_misc ]; then \
 		echo -1 | sudo tee /proc/sys/fs/binfmt_misc/APEX-WIN > /dev/null 2>&1 || true; \
