@@ -128,7 +128,7 @@ quick-install: cargo-release
 	@# Register binfmt_misc
 	@if [ -d /proc/sys/fs/binfmt_misc ]; then \
 		echo -1 | sudo tee /proc/sys/fs/binfmt_misc/APEX-WIN > /dev/null 2>&1 || true; \
-		echo ":APEX-WIN:M:0:\\x4d\\x5a:$(BINDIR)/win-sandbox-runner:CF" | sudo tee /proc/sys/fs/binfmt_misc/register > /dev/null 2>&1 && \
+		echo ":APEX-WIN:M:0:\\x4d\\x5a:\\xff\\xff:$(BINDIR)/win-sandbox-runner:CF" | sudo tee /proc/sys/fs/binfmt_misc/register > /dev/null 2>&1 && \
 		echo "✓ binfmt_misc registered (.exe -> win-sandbox-runner)" || \
 		echo "WARN: Failed to register binfmt handler"; \
 	fi

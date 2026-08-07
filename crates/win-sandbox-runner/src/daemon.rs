@@ -146,7 +146,7 @@ fn register_binfmt() -> Result<()> {
     // We use C (credential inheritance) and F (fix binary) flags.
     // C ensures the runner inherits the credentials of the user who launched the exe.
     let registration =
-        ":APEX-WIN:M:0:\\x4d\\x5a:/usr/bin/win-sandbox-runner:CF\n".to_string();
+        ":APEX-WIN:M:0:\\x4d\\x5a:\\xff\\xff:/usr/bin/win-sandbox-runner:CF\n".to_string();
 
     // First, unregister if already registered
     let status_path = binfmt_dir.join("APEX-WIN");
@@ -341,8 +341,11 @@ pub fn run_daemon() -> Result<()> {
     ensure_runtime_dir()?;
     write_pid()?;
 
-    // 3. Register binfmt_misc
-    register_binfmt()?;
+    // 3. Register binfmt_misc (non-fatal — daemon can still serve IPC/FIFO)
+    if let Err(e) = register_binfmt() {
+        warn!("binfmt_misc registration failed: {e}");
+        warn!("Daemon will still run; .exe interception via FIFO/IPC available.");
+    }
 
     // 4. Create FIFO
     create_fifo()?;
