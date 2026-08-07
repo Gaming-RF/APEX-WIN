@@ -110,6 +110,26 @@ cargo-test:
 cargo-clippy:
 	cargo clippy --workspace -- -D warnings
 
+# Quick install: Rust binaries + systemd service + binfmt (no C components)
+quick-install: cargo-release install-systemd
+	install -Dm755 target/release/win-sandbox-runner $(DESTDIR)$(BINDIR)/win-sandbox-runner
+	install -Dm755 target/release/win-sandbox-gui $(DESTDIR)$(BINDIR)/win-sandbox-gui
+	install -Dm644 scripts/register-binfmt.sh $(DESTDIR)$(BINDIR)/register-binfmt.sh
+	@# Register binfmt_misc
+	@if [ -d /proc/sys/fs/binfmt_misc ]; then \
+		echo -1 > /proc/sys/fs/binfmt_misc/APEX-WIN 2>/dev/null || true; \
+		echo ":APEX-WIN:M:0:\\x4d\\x5a:$(DESTDIR)$(BINDIR)/win-sandbox-runner:CF" > /proc/sys/fs/binfmt_misc/register 2>/dev/null && \
+		echo "✓ binfmt_misc registered (.exe -> win-sandbox-runner)" || \
+		echo "WARN: Failed to register binfmt handler"; \
+	fi
+	@systemctl daemon-reload 2>/dev/null || true
+	@echo ""
+	@echo "✓ Installed! Start the daemon:"
+	@echo "  sudo systemctl enable --now win-sandbox-runner"
+	@echo ""
+	@echo "Then run any .exe:"
+	@echo "  /path/to/program.exe"
+
 # Install Rust binaries + config + C components
 cargo-install: cargo-release install-bridge install-ebpf install-dll install-binfmt install-systemd
 	install -d $(DESTDIR)$(BINDIR)
