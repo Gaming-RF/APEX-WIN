@@ -59,12 +59,21 @@ pub fn run(args: &Args) -> Result<ExitCode> {
 
     // Now exec wine — Landlock rules are inherited by child processes
     info!("Launching wine in Landlock sandbox");
-    let sandbox_env = crate::env_sanitize::build_sandbox_env(&config)?;
+    let user_env = if args.user_env.is_empty() {
+        None
+    } else {
+        Some(&args.user_env)
+    };
+    let sandbox_env = crate::env_sanitize::build_sandbox_env(&config, user_env)?;
     let mut cmd = Command::new("wine");
     cmd.arg(exe).args(&args.args);
     cmd.env_clear();
     for (key, val) in &sandbox_env {
         cmd.env(key, val);
+    }
+    // Switch to target UID in the child process (daemon mode)
+    if let Some(uid) = args.uid {
+        unsafe { crate::daemon::configure_child_uid(&mut cmd, uid) };
     }
     let err = cmd.exec();
 
@@ -157,6 +166,8 @@ mod tests {
             reload: false,
             stop: false,
             unregister: false,
+            user_env: std::collections::HashMap::new(),
+            uid: None,
         };
         let paths = build_ro_paths("/home/test/.wine", &args);
         assert!(paths.contains(&"/usr".to_string()));
@@ -189,6 +200,8 @@ mod tests {
             reload: false,
             stop: false,
             unregister: false,
+            user_env: std::collections::HashMap::new(),
+            uid: None,
         };
         let paths = build_ro_paths("/tmp/.wine", &args);
         // "/" must NOT be in ro_paths (would grant read to entire root)

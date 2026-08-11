@@ -78,7 +78,12 @@ pub fn run_with_network(args: &Args, network: bool) -> Result<ExitCode> {
     // Exec wine with WINEPREFIX pointing to the merged overlay
     info!("Launching wine in OverlayFS sandbox (changes lost on exit)");
 
-    let sandbox_env = crate::env_sanitize::build_sandbox_env(&config)?;
+    let user_env = if args.user_env.is_empty() {
+        None
+    } else {
+        Some(&args.user_env)
+    };
+    let sandbox_env = crate::env_sanitize::build_sandbox_env(&config, user_env)?;
     let mut cmd = Command::new("wine");
     cmd.arg(exe).args(&args.args);
     cmd.env_clear();
@@ -108,6 +113,11 @@ pub fn run_with_network(args: &Args, network: bool) -> Result<ExitCode> {
             cmd.env("WINE_BRIDGE_SOCKET", &config.tap_bridge_socket);
             info!("Networking enabled via TAP bridge for OverlayFS sandbox");
         }
+    }
+
+    // Switch to target UID in the child process (daemon mode)
+    if let Some(uid) = args.uid {
+        unsafe { crate::daemon::configure_child_uid(&mut cmd, uid) };
     }
 
     let err = cmd.exec();

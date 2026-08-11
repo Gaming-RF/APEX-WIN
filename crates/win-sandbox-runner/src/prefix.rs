@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use nix::unistd::{Gid, Uid};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
@@ -77,12 +78,19 @@ impl PrefixManager {
 
     /// Ensure a Wine prefix exists for the given hash. Creates it if missing.
     /// Returns the WINEPREFIX path.
-    pub fn ensure_prefix(&self, hash: &str) -> Result<PathBuf> {
+    ///
+    /// When `uid` is set (daemon mode), created directories are chowned to that user.
+    pub fn ensure_prefix(&self, hash: &str, uid: Option<u32>) -> Result<PathBuf> {
         let prefix = self.wine_prefix(hash);
         if !prefix.exists() {
             info!("Creating Wine prefix at {}", prefix.display());
             std::fs::create_dir_all(&prefix)
                 .with_context(|| format!("Failed to create prefix dir {}", prefix.display()))?;
+
+            // Chown prefix directory tree to the target user (daemon runs as root)
+            if let Some(uid) = uid {
+                chown_recursive(&self.prefix_dir(hash), uid);
+            }
 
             // Initialize the prefix with wineboot
             let status = std::process::Command::new("wineboot")
@@ -259,13 +267,16 @@ impl PrefixManager {
 
     /// Full setup: ensure prefix exists, install DXVK and winetricks if needed.
     /// Returns the WINEPREFIX path. Idempotent — skips already-installed deps.
+    ///
+    /// When `uid` is set (daemon mode), created directories are chowned to that user.
     pub fn setup_app(
         &self,
         hash: &str,
         needs_dxvk: bool,
         winetricks: &[String],
+        uid: Option<u32>,
     ) -> Result<PathBuf> {
-        let prefix = self.ensure_prefix(hash)?;
+        let prefix = self.ensure_prefix(hash, uid)?;
 
         let (missing_dxvk, missing_wt) = self.check_deps(hash, needs_dxvk, winetricks);
 
@@ -306,6 +317,37 @@ fn dirs_or_fallback(env: &str, suffix: &str) -> PathBuf {
         PathBuf::from("/tmp")
     };
     base.join(suffix)
+}
+
+/// Recursively chown a directory tree to the given UID.
+/// Looks up the user's primary group via getpwuid.
+fn chown_recursive(path: &Path, uid: u32) {
+    let uid = Uid::from_raw(uid);
+    // Look up primary group; fallback to keeping current group
+    let gid = unsafe {
+        let passwd = libc::getpwuid(uid.as_raw());
+        if passwd.is_null() {
+            None
+        } else {
+            Some(Gid::from_raw((*passwd).pw_gid))
+        }
+    };
+
+    if let Err(e) = nix::unistd::chown(path, Some(uid), gid) {
+        warn!("Failed to chown {}: {e}", path.display());
+    }
+
+    // Recurse into subdirectories
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let child = entry.path();
+            if child.is_dir() {
+                chown_recursive(&child, uid.as_raw());
+            } else if let Err(e) = nix::unistd::chown(&child, Some(uid), gid) {
+                warn!("Failed to chown {}: {e}", child.display());
+            }
+        }
+    }
 }
 
 /// Current timestamp as ISO 8601 string (simple, no chrono dep).
@@ -393,7 +435,7 @@ mod tests {
 
         // ensure_prefix will try to run wineboot, which may fail in test env
         // but it should still create the directory
-        let _ = mgr.ensure_prefix(hash);
+        let _ = mgr.ensure_prefix(hash, None);
         assert!(mgr.wine_prefix(hash).exists());
     }
 

@@ -125,7 +125,12 @@ pub fn run_with_network(args: &Args, network: bool) -> Result<ExitCode> {
     crate::net::bind_ntsync(&mut cmd);
 
     // Sanitized environment — clear inherited env, apply allowlisted vars only
-    let sandbox_env = crate::env_sanitize::build_sandbox_env(&config)?;
+    let user_env = if args.user_env.is_empty() {
+        None
+    } else {
+        Some(&args.user_env)
+    };
+    let sandbox_env = crate::env_sanitize::build_sandbox_env(&config, user_env)?;
     cmd.env_clear();
     for (key, val) in &sandbox_env {
         cmd.env(key, val);
@@ -146,6 +151,11 @@ pub fn run_with_network(args: &Args, network: bool) -> Result<ExitCode> {
     cmd.args(&args.args);
 
     info!("Executing bwrap for {exe}");
+
+    // Switch to target UID in the child process (daemon mode)
+    if let Some(uid) = args.uid {
+        unsafe { crate::daemon::configure_child_uid(&mut cmd, uid) };
+    }
 
     let err = cmd.exec();
     bail!("Failed to exec bwrap: {err}");

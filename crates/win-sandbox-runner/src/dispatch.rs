@@ -70,7 +70,7 @@ pub fn execute(
     // --- Step 4: Per-app prefix management ---
     if let Some(ref entry) = matched_entry {
         let prefix_mgr = crate::prefix::PrefixManager::new();
-        let wine_prefix = prefix_mgr.setup_app(hash, entry.dxvk, &entry.winetricks)?;
+        let wine_prefix = prefix_mgr.setup_app(hash, entry.dxvk, &entry.winetricks, args.uid)?;
         std::env::set_var("WINEPREFIX", &wine_prefix);
         info!("WINEPREFIX: {}", wine_prefix.display());
     }
@@ -130,10 +130,16 @@ pub fn execute(
         .map(|e| e.env.clone())
         .unwrap_or_default();
 
+    // Merge user env (from daemon FIFO) with app env
+    let mut merged_env = app_env;
+    for (k, v) in &args.user_env {
+        merged_env.entry(k.clone()).or_insert_with(|| v.clone());
+    }
+
     info!("Executing tier {tier} for {exe}");
 
     match tier {
-        Tier::Tier0 => crate::tier0::run_with_env(args, &app_env),
+        Tier::Tier0 => crate::tier0::run_with_env(args, &merged_env),
         Tier::Tier1 => crate::tier1::run(args),
         Tier::Tier2 => crate::tier2::run_with_network(args, network),
         Tier::Tier3 => crate::tier3::run_with_network(args, network),

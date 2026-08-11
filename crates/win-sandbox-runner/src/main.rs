@@ -117,6 +117,14 @@ struct Args {
     /// Unregister the binfmt_misc handler (cleanup before uninstall).
     #[arg(long)]
     unregister: bool,
+
+    /// User environment variables (set by daemon, not CLI).
+    #[arg(skip)]
+    user_env: std::collections::HashMap<String, String>,
+
+    /// Target UID for child process (set by daemon, not CLI).
+    #[arg(skip)]
+    uid: Option<u32>,
 }
 
 fn main() -> ExitCode {

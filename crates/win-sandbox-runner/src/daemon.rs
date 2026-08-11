@@ -315,6 +315,35 @@ fn handle_ipc_command(
     Ok(())
 }
 
+/// Configure a Command to switch to the given UID/GID in the child process.
+///
+/// Uses `pre_exec()` to call setgid/setuid before exec, so the Wine process
+/// runs as the user who launched the .exe, not as root.
+///
+/// # Safety
+/// Uses `pre_exec` which runs in the forked child. `libc::getpwuid`, `setgid`,
+/// and `setuid` are async-signal-safe.
+pub unsafe fn configure_child_uid(cmd: &mut std::process::Command, uid: u32) {
+    use std::os::unix::process::CommandExt;
+    unsafe {
+        cmd.pre_exec(move || {
+            // Look up user's primary group
+            let passwd = libc::getpwuid(uid);
+            if !passwd.is_null() {
+                let gid = (*passwd).pw_gid;
+                if libc::setgid(gid) != 0 {
+                    tracing::warn!("Failed to setgid({gid}): {}", std::io::Error::last_os_error());
+                }
+            }
+            if libc::setuid(uid) != 0 {
+                tracing::warn!("Failed to setuid({uid}): {}", std::io::Error::last_os_error());
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
 /// Main daemon entry point.
 ///
 /// 1. Loads all state into memory
@@ -491,18 +520,13 @@ fn handle_launch(req: &LaunchRequest, state: &Arc<Mutex<DaemonState>>) -> Result
         *state.launch_history.entry(req.exe_path.clone()).or_insert(0) += 1;
     }
 
-    // Set user environment variables for display access
-    for (k, v) in &req.env {
-        std::env::set_var(k, v);
-    }
-
-    // Note: UID switching happens in the forked child process (inside dispatch::execute)
-    // via pre_exec(), not here — setuid in the daemon would break subsequent launches.
+    // Note: user env vars are passed via Args.user_env — no global set_var.
+    // UID switching happens in the forked child process via pre_exec().
 
     // Hash the binary
     let hash = hasher::hash_file(&req.exe_path)?;
 
-    // Build Args for the dispatch
+    // Build Args for the dispatch, passing user env and UID from FIFO message
     let args = Args {
         exe: Some(req.exe_path.clone()),
         tier: None,
@@ -525,6 +549,8 @@ fn handle_launch(req: &LaunchRequest, state: &Arc<Mutex<DaemonState>>) -> Result
         reload: false,
         stop: false,
         unregister: false,
+        user_env: req.env.clone(),
+        uid: req.uid,
     };
 
     // Lock state for dispatch (keeps app_db and rules consistent)

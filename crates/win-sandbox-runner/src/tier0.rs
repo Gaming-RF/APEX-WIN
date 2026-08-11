@@ -24,7 +24,12 @@ pub fn run_with_env(
     info!("Tier 0: Direct wine execution for {exe}");
 
     let config = crate::config::load_config(None);
-    let sandbox_env = crate::env_sanitize::build_sandbox_env(&config)?;
+    let user_env = if args.user_env.is_empty() {
+        None
+    } else {
+        Some(&args.user_env)
+    };
+    let sandbox_env = crate::env_sanitize::build_sandbox_env(&config, user_env)?;
 
     let mut cmd = Command::new("wine");
     cmd.arg(exe);
@@ -38,6 +43,11 @@ pub fn run_with_env(
     // Layer app-specific env on top
     for (key, val) in app_env {
         cmd.env(key, val);
+    }
+
+    // Switch to target UID in the child process (daemon mode)
+    if let Some(uid) = args.uid {
+        unsafe { crate::daemon::configure_child_uid(&mut cmd, uid) };
     }
 
     let status = cmd.status()?;

@@ -38,7 +38,13 @@ const STRIPPED_ENV_VARS: &[&str] = &[
 ///
 /// Only allows explicitly whitelisted env vars through. Strips secrets,
 /// proxy configs, and other sensitive data. Randomizes HOSTNAME.
-pub fn build_sandbox_env(config: &Config) -> Result<HashMap<String, String>> {
+///
+/// When `user_env` is provided (daemon mode), those values take priority
+/// over the current process environment for allowed variables.
+pub fn build_sandbox_env(
+    config: &Config,
+    user_env: Option<&HashMap<String, String>>,
+) -> Result<HashMap<String, String>> {
     let mut env = HashMap::new();
 
     // Forward allowed variables from current environment
@@ -46,6 +52,16 @@ pub fn build_sandbox_env(config: &Config) -> Result<HashMap<String, String>> {
         if let Ok(val) = std::env::var(var) {
             debug!("Forwarding env: {var}");
             env.insert(var.to_string(), val);
+        }
+    }
+
+    // Overlay user-provided env (daemon mode: user's display, runtime dir, etc.)
+    if let Some(user) = user_env {
+        for &var in ALLOWED_ENV_VARS {
+            if let Some(val) = user.get(var) {
+                debug!("User env override: {var}");
+                env.insert(var.to_string(), val.clone());
+            }
         }
     }
 
@@ -128,7 +144,7 @@ mod tests {
     #[test]
     fn build_sandbox_env_has_wineprefix() {
         let config = Config::default();
-        let env = build_sandbox_env(&config).unwrap();
+        let env = build_sandbox_env(&config, None).unwrap();
         assert!(env.contains_key("WINEPREFIX"));
         assert!(env.contains_key("WIN_SANDBOX_ACTIVE"));
         assert!(env.contains_key("HOSTNAME"));
@@ -139,8 +155,30 @@ mod tests {
         // Set a secret env var
         std::env::set_var("AWS_SECRET_ACCESS_KEY", "supersecret");
         let config = Config::default();
-        let env = build_sandbox_env(&config).unwrap();
+        let env = build_sandbox_env(&config, None).unwrap();
         assert!(!env.contains_key("AWS_SECRET_ACCESS_KEY"));
         std::env::remove_var("AWS_SECRET_ACCESS_KEY");
+    }
+
+    #[test]
+    fn build_sandbox_env_merges_user_env() {
+        let config = Config::default();
+        let mut user_env = HashMap::new();
+        user_env.insert("DISPLAY".to_string(), ":99".to_string());
+        user_env.insert("WAYLAND_DISPLAY".to_string(), "wayland-1".to_string());
+        let env = build_sandbox_env(&config, Some(&user_env)).unwrap();
+        assert_eq!(env.get("DISPLAY").unwrap(), ":99");
+        assert_eq!(env.get("WAYLAND_DISPLAY").unwrap(), "wayland-1");
+    }
+
+    #[test]
+    fn build_sandbox_env_user_env_only_allowed() {
+        let config = Config::default();
+        let mut user_env = HashMap::new();
+        user_env.insert("DISPLAY".to_string(), ":0".to_string());
+        user_env.insert("SECRET_VAR".to_string(), "should_not_pass".to_string());
+        let env = build_sandbox_env(&config, Some(&user_env)).unwrap();
+        assert_eq!(env.get("DISPLAY").unwrap(), ":0");
+        assert!(!env.contains_key("SECRET_VAR"));
     }
 }
