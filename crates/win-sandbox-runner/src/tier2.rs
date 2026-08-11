@@ -157,6 +157,17 @@ pub fn run_with_network(args: &Args, network: bool) -> Result<ExitCode> {
         unsafe { crate::daemon::configure_child_uid(&mut cmd, uid) };
     }
 
+    // Daemon mode (uid set): use status() so the daemon process survives.
+    // CLI mode: use exec() to replace current process with bwrap.
+    if args.uid.is_some() {
+        let status = cmd.status()?;
+        let code = status.code().unwrap_or(1);
+        if code != 0 {
+            bail!("bwrap exited with status: {code}");
+        }
+        return Ok(ExitCode::from(code as u8));
+    }
+
     let err = cmd.exec();
     bail!("Failed to exec bwrap: {err}");
 }

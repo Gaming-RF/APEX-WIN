@@ -428,12 +428,24 @@ pub fn run_daemon() -> Result<()> {
             }
         };
 
-        let reader = BufReader::new(fifo);
+        // Use read_line() instead of lines() to correctly handle O_NONBLOCK.
+        // BufReader::lines() treats WouldBlock as a fatal error, losing any
+        // buffered partial data. read_line() preserves the internal buffer
+        // across calls, so we can retry on WouldBlock without data loss.
+        let mut reader = BufReader::new(fifo);
+        let mut line_buf = String::new();
         let mut message_lines: Vec<String> = Vec::new();
-        for line in reader.lines() {
-            match line {
-                Ok(text) => {
-                    let text = text.trim().to_string();
+        loop {
+            line_buf.clear();
+            match reader.read_line(&mut line_buf) {
+                Ok(0) => {
+                    // EOF — writer closed its end of the FIFO.
+                    // Flush any remaining partial message.
+                    flush_pending_message(&message_lines, &state);
+                    break; // Re-open FIFO
+                }
+                Ok(_) => {
+                    let text = line_buf.trim().to_string();
                     if text.is_empty() && !message_lines.is_empty() {
                         // Empty line = end of message
                         if let Some(req) = parse_launch_message(&message_lines) {
@@ -450,21 +462,18 @@ pub fn run_daemon() -> Result<()> {
                         message_lines.push(text);
                     }
                 }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // No data available yet — the writer may still be writing.
+                    // BufReader's internal buffer preserves any partial line,
+                    // so the next read_line() call will resume correctly.
+                    thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                }
                 Err(e) => {
-                    // Writer closed — flush any remaining message
-                    if !message_lines.is_empty() {
-                        if let Some(req) = parse_launch_message(&message_lines) {
-                            info!("Daemon: intercepted .exe launch: {}", req.exe_path);
-                            let state = Arc::clone(&state);
-                            thread::spawn(move || {
-                                if let Err(e) = handle_launch(&req, &state) {
-                                    error!("Launch failed for {}: {e:#}", req.exe_path);
-                                }
-                            });
-                        }
-                    }
+                    // Real I/O error — flush any partial message and re-open.
+                    flush_pending_message(&message_lines, &state);
                     debug!("FIFO read error (writer closed): {e}");
-                    break; // Re-open FIFO
+                    break;
                 }
             }
         }
@@ -476,6 +485,22 @@ pub fn run_daemon() -> Result<()> {
     cleanup_runtime();
     info!("APEX-WIN daemon stopped.");
     Ok(())
+}
+
+/// Flush a partial message collected from the FIFO before re-opening.
+fn flush_pending_message(lines: &[String], state: &Arc<Mutex<DaemonState>>) {
+    if lines.is_empty() {
+        return;
+    }
+    if let Some(req) = parse_launch_message(lines) {
+        info!("Daemon: intercepted .exe launch: {}", req.exe_path);
+        let state = Arc::clone(state);
+        thread::spawn(move || {
+            if let Err(e) = handle_launch(&req, &state) {
+                error!("Launch failed for {}: {e:#}", req.exe_path);
+            }
+        });
+    }
 }
 
 /// A launch request received via FIFO, including user context.

@@ -75,8 +75,21 @@ pub fn run(args: &Args) -> Result<ExitCode> {
     if let Some(uid) = args.uid {
         unsafe { crate::daemon::configure_child_uid(&mut cmd, uid) };
     }
-    let err = cmd.exec();
 
+    // Daemon mode (uid set): use status() so the daemon process survives.
+    // CLI mode: use exec() to replace current process with wine.
+    if args.uid.is_some() {
+        let status = cmd.status()?;
+        let code = status.code().unwrap_or(1);
+        if code != 0 {
+            bail!("Wine exited with status: {code}");
+        }
+        // Landlock was applied via restrict_self() above — status() forks a
+        // child that inherits the ruleset, so the sandbox is effective.
+        return Ok(ExitCode::from(code as u8));
+    }
+
+    let err = cmd.exec();
     bail!("Failed to exec wine: {err}");
 }
 
