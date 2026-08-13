@@ -180,7 +180,7 @@ cargo-install: cargo-release install-bridge install-ebpf install-dll install-bin
 	@# Register binfmt_misc
 	@if [ -d /proc/sys/fs/binfmt_misc ]; then \
 		echo -1 > /proc/sys/fs/binfmt_misc/APEX-WIN 2>/dev/null || true; \
-		echo ":APEX-WIN:M:0:\\x4d\\x5a:$(DESTDIR)$(BINDIR)/win-sandbox-runner:CF" > /proc/sys/fs/binfmt_misc/register 2>/dev/null && \
+		echo ":APEX-WIN:M:0:\\x4d\\x5a:\\xff\\xff:$(DESTDIR)$(BINDIR)/win-sandbox-runner:CF" > /proc/sys/fs/binfmt_misc/register 2>/dev/null && \
 		echo "binfmt_misc handler registered (.exe -> win-sandbox-runner)" || \
 		echo "WARN: Failed to register binfmt handler (run register-binfmt.sh manually)"; \
 	fi

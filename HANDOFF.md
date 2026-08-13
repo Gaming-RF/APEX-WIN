@@ -233,7 +233,14 @@ Resolved since the first draft of this document:
 
 Still open:
 
-1. ~~Daemon FIFO path (Path B) broken~~ — **fixed and verified.** Both launch
+1. **binfmt definition is duplicated across 5 sites** — Makefile (x3),
+   scripts/install.sh, scripts/build-deb.sh, plus daemon.rs and
+   register-binfmt.sh. The same missing-mask bug (kernel returns EINVAL without
+   `\xff\xff`) has now been found and fixed independently in three of them,
+   because there is no single source of truth. Collapse to one definition: have
+   every path shell out to `register-binfmt.sh`, or generate the string once.
+
+2. ~~Daemon FIFO path (Path B) broken~~ — **fixed and verified.** Both launch
    paths now map a real window.
 
    Worth reading if you hit something similar. The failure was

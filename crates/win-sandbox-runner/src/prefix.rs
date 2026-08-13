@@ -328,11 +328,12 @@ impl PrefixManager {
     }
 }
 
-impl Default for PrefixManager {
-    fn default() -> Self {
-        Self::for_current_process()
-    }
-}
+// No `impl Default` on purpose. Default::default() would silently resolve the
+// prefix from the current process environment, which is wrong under the daemon
+// (root: HOME=/root or unset). That is the exact footgun renaming new() ->
+// for_current_process() was meant to remove, and Default has an even more
+// inviting name. Callers must state whose environment they mean:
+// for_user(&user_env) in daemon paths, for_current_process() for direct CLI.
 
 /// Build a path from $HOME + suffix, or fallback.
 fn dirs_or_fallback(env: &str, suffix: &str) -> PathBuf {
