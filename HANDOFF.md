@@ -16,13 +16,33 @@ Transparent tiered sandbox for running Windows `.exe` files via Wine on Linux. U
 
 ## Architecture
 
+There are **two independent launch paths**. Both are required; neither
+substitutes for the other.
+
+**Path A — file manager double-click (the primary user experience)**
+
 ```
-User double-clicks .exe
+User double-clicks .exe in Nautilus
+  → GNOME resolves the MIME type (application/vnd.microsoft.portable-executable)
+  → Launches the registered handler: apex-win.desktop
+  → Exec=win-sandbox-runner --exe %f
+  → dispatch → tier → Wine
+```
+
+Nautilus **never `exec()`s the file**, so binfmt_misc is not involved here.
+Without `apex-win.desktop` installed and registered, double-click does nothing
+useful, no matter how correct the daemon is. This was the actual reason
+double-click appeared broken.
+
+**Path B — terminal / script execution**
+
+```
+User runs ./game.exe (or a script does)
   → Kernel sees MZ header → binfmt_misc triggers /usr/bin/win-sandbox-runner
-  → main() detects .exe as positional arg → writes to daemon FIFO with env vars
+  → main() detects .exe as a positional arg → writes to daemon FIFO with env
   → Daemon reads FIFO, hashes binary, looks up app DB + rules
-  → Dispatches to tier 0/1/2/3 with appropriate Wine sandbox config
-  → Wine runs the .exe transparently
+  → Dispatches to tier 0/1/2/3
+  → Wine runs the .exe
 ```
 
 ### Four Isolation Tiers
@@ -46,6 +66,7 @@ User double-clicks .exe
 | `crates/win-sandbox-runner/src/config.rs` | Config file discovery |
 | `crates/win-sandbox-runner/src/hasher.rs` | Binary hashing |
 | `scripts/win-sandbox-runner.service` | systemd unit file |
+| `scripts/apex-win.desktop` | MIME handler — makes double-click work |
 | `config/appdb.json` | Embedded app database |
 | `config/rules.json` | Sandbox rules |
 | `config/net-optimizer.json` | Network optimization config |
@@ -101,6 +122,7 @@ After `make quick-install`:
 | `/usr/bin/win-sandbox-runner` | Main binary (CLI + daemon) |
 | `/usr/bin/win-sandbox-gui` | GUI companion |
 | `/etc/systemd/system/win-sandbox-runner.service` | systemd unit |
+| `/usr/share/applications/apex-win.desktop` | double-click MIME handler |
 | `/etc/win-sandbox-runner/appdb.json` | App database |
 | `/etc/win-sandbox-runner/rules.json` | Sandbox rules |
 | `/etc/win-sandbox-runner/net-optimizer.json` | Network config |
@@ -194,11 +216,16 @@ Still open:
    `/etc/win-sandbox-runner/`, but a missing config dir silently degrades to an
    empty database.
 
-3. **Tier 2/3 not acceptance-tested** — only Tier 0 (trusted) and Tier 1 (Landlock)
+3. **Daemon FIFO path (Path B) not re-tested after the env fix** — the
+   double-click path (Path A) is verified. Path B routes through the root
+   daemon, which has no user environment and depends on FIFO env forwarding.
+   Needs the same `xwininfo` confirmation once the fixed binary is installed.
+
+4. **Tier 2/3 not acceptance-tested** — only Tier 0 (trusted) and Tier 1 (Landlock)
    have been exercised against a real GUI app. Tier 2 (bubblewrap) and Tier 3
    (Xephyr/Xvfb) still need the same `xwininfo` confirmation.
 
-4. **Wayland path untested** — verification was on X11 (`XDG_SESSION_TYPE=x11`).
+5. **Wayland path untested** — verification was on X11 (`XDG_SESSION_TYPE=x11`).
    A Wayland session takes a different Wine driver path.
 
 ### Debugging note
