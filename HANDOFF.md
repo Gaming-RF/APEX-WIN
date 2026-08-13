@@ -1,8 +1,8 @@
 # APEX-WIN Handoff Document
 
-**Last updated**: 2026-08-07 v0.3.0+ (post-daemon work)
+**Last updated**: 2026-08-13 — acceptance verified (real GUI window confirmed)
 **Repository**: https://github.com/Gaming-RF/APEX-WIN
-**Branch**: main (HEAD at `9ec8bde`)
+**Branch**: main (HEAD at `237780d`)
 
 ---
 
@@ -173,15 +173,41 @@ cargo clippy --workspace -- -D warnings  # Clean
 
 ## Known Remaining Issues
 
-1. **Environment is set globally in daemon threads** — `std::env::set_var` in threads is not perfectly thread-safe. Should pass env to `Command::env()` in child process instead. Works in practice due to sequential launches.
+**Verified working** (2026-08-13): full chain launches a real Windows GUI app.
+Evidence: `xwininfo -root -tree` showed `"7-Zip 24.09 (x64) Setup"` 300x182 owned
+by the exe and framed by `mutter-x11-frames`, with zero display errors, prefix
+created under `~/.local/share/win-sandbox/prefixes/<hash>/prefix`.
 
-2. **UID not switched in child process** — `LaunchRequest.uid` is captured but not yet applied via `pre_exec()` in the forked Wine child. The daemon sets env as root.
+Resolved since the first draft of this document:
+- ~~Environment set globally in daemon threads~~ → per-child `Command::env()` (`ad2cbd6`)
+- ~~UID not switched in child process~~ → `configure_child_uid` via `pre_exec` (`ad2cbd6`)
+- ~~Wine prefix created as root~~ → prefix ownership fixed (`ad2cbd6`)
+- ~~`XAUTHORITY` stripped by sanitizer~~ → added to allowlist (`237780d`)
+- ~~`WINEPREFIX` clobbered by config default~~ → config is now fallback only (`237780d`)
 
-3. **Wine prefix created as root** — Prefix directories are owned by root. Should be owned by the user. Needs per-child `setuid` before Wine execution.
+Still open:
 
-4. **No .deb package** — `make deb` target exists but wasn't updated for v0.3.0 changes.
+1. **No .deb package** — `make deb` target exists but was not updated for v0.3.0.
 
-5. **appdb.json not truly embedded** — `load_embedded()` reads from filesystem, not `include_str!`. Works because configs are now installed to `/etc/`.
+2. **`appdb.json` not truly embedded** — `load_embedded()` reads from the filesystem
+   rather than `include_str!`. Works because `make quick-install` copies configs to
+   `/etc/win-sandbox-runner/`, but a missing config dir silently degrades to an
+   empty database.
+
+3. **Tier 2/3 not acceptance-tested** — only Tier 0 (trusted) and Tier 1 (Landlock)
+   have been exercised against a real GUI app. Tier 2 (bubblewrap) and Tier 3
+   (Xephyr/Xvfb) still need the same `xwininfo` confirmation.
+
+4. **Wayland path untested** — verification was on X11 (`XDG_SESSION_TYPE=x11`).
+   A Wayland session takes a different Wine driver path.
+
+### Debugging note
+
+When testing Wine directly, do **not** put the prefix under `/tmp`. Wine refuses
+with `'/tmp' is not owned by you, refusing to create a configuration directory there`
+and exits immediately. This produces a misleading "no errors" result. Always use a
+user-owned path and confirm a window with `xwininfo -root -tree`, rather than
+inferring success from absent error messages.
 
 ---
 
