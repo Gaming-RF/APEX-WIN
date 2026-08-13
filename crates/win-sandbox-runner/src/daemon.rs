@@ -656,4 +656,71 @@ mod tests {
             PathBuf::from("/run/win-sandbox-runner/daemon.pid")
         );
     }
+
+    /// Exact wire format written by the binfmt handler in main().
+    fn sample_fifo_message(home: &str) -> Vec<String> {
+        vec![
+            "/home/alice/game.exe".to_string(),
+            "UID:1000".to_string(),
+            format!("ENV:HOME={home}"),
+            "ENV:DISPLAY=:0".to_string(),
+            "ENV:XAUTHORITY=/run/user/1000/gdm/Xauthority".to_string(),
+            "ENV:XDG_RUNTIME_DIR=/run/user/1000".to_string(),
+        ]
+    }
+
+    #[test]
+    fn parse_launch_message_extracts_uid_and_env() {
+        let req = parse_launch_message(&sample_fifo_message("/home/alice")).unwrap();
+
+        assert_eq!(req.exe_path, "/home/alice/game.exe");
+        assert_eq!(req.uid, Some(1000));
+        assert_eq!(req.env.get("HOME").unwrap(), "/home/alice");
+        assert_eq!(req.env.get("DISPLAY").unwrap(), ":0");
+        assert_eq!(
+            req.env.get("XAUTHORITY").unwrap(),
+            "/run/user/1000/gdm/Xauthority",
+            "XAUTHORITY must survive FIFO transport or X11 auth fails"
+        );
+    }
+
+    /// Ties the whole daemon chain together: FIFO bytes -> LaunchRequest.env
+    /// -> PrefixManager::for_user. The daemon runs as root, so if the user's
+    /// HOME is lost anywhere along this path the prefix lands in /root
+    /// (permission denied) or /tmp (Wine refuses: "not owned by you") —
+    /// which is exactly the failure seen in the journal.
+    #[test]
+    fn fifo_env_reaches_prefix_resolution() {
+        let req = parse_launch_message(&sample_fifo_message("/home/alice")).unwrap();
+
+        let prefix = crate::prefix::PrefixManager::for_user(&req.env).wine_prefix("abc123");
+
+        assert!(
+            prefix.starts_with("/home/alice/.local/share/win-sandbox/prefixes"),
+            "prefix must resolve under the user's home, got {}",
+            prefix.display()
+        );
+        assert!(!prefix.starts_with("/root"), "must not use root's home");
+        assert!(!prefix.starts_with("/tmp"), "Wine refuses /tmp prefixes");
+    }
+
+    /// Values containing '=' (paths, D-Bus addresses) must not be truncated.
+    #[test]
+    fn parse_launch_message_preserves_equals_in_values() {
+        let lines = vec![
+            "/x/app.exe".to_string(),
+            "ENV:DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus".to_string(),
+        ];
+        let req = parse_launch_message(&lines).unwrap();
+        assert_eq!(
+            req.env.get("DBUS_SESSION_BUS_ADDRESS").unwrap(),
+            "unix:path=/run/user/1000/bus"
+        );
+    }
+
+    #[test]
+    fn parse_launch_message_rejects_empty() {
+        assert!(parse_launch_message(&[]).is_none());
+        assert!(parse_launch_message(&["".to_string()]).is_none());
+    }
 }

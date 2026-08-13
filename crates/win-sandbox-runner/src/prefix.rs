@@ -28,9 +28,34 @@ pub struct PrefixManager {
 
 impl PrefixManager {
     /// Create a new prefix manager rooted at the default location.
+    ///
+    /// Resolves from the *current process* environment. Correct for direct
+    /// CLI use, but NOT for the daemon: it runs as root under systemd, where
+    /// HOME is `/root` (permission denied) or unset (falls back to `/tmp`,
+    /// which Wine refuses with "not owned by you"). Daemon paths must use
+    /// [`PrefixManager::for_user`] instead.
     pub fn new() -> Self {
         let base_dir = dirs_or_fallback("XDG_DATA_HOME", ".local/share/win-sandbox/prefixes");
         Self { base_dir }
+    }
+
+    /// Create a prefix manager rooted at the *invoking user's* home.
+    ///
+    /// `user_env` is the environment forwarded over the daemon FIFO. Uses
+    /// XDG_DATA_HOME if present, else HOME. Falls back to [`Self::new`] when
+    /// neither is available, preserving direct-CLI behaviour.
+    pub fn for_user(user_env: &std::collections::HashMap<String, String>) -> Self {
+        if let Some(xdg) = user_env.get("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
+            return Self {
+                base_dir: PathBuf::from(xdg).join("win-sandbox/prefixes"),
+            };
+        }
+        if let Some(home) = user_env.get("HOME").filter(|v| !v.is_empty()) {
+            return Self {
+                base_dir: PathBuf::from(home).join(".local/share/win-sandbox/prefixes"),
+            };
+        }
+        Self::new()
     }
 
     /// Create a prefix manager with a custom base directory (for testing).
@@ -362,6 +387,65 @@ fn chrono_now() -> String {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// The daemon runs as root, where HOME is /root or unset. It must root
+    /// prefixes at the invoking user's home, taken from the forwarded FIFO
+    /// env, or Wine gets an unwritable path (/root) or one it refuses (/tmp).
+    #[test]
+    fn for_user_uses_forwarded_home() {
+        let mut env = std::collections::HashMap::new();
+        env.insert("HOME".to_string(), "/home/alice".to_string());
+
+        let mgr = PrefixManager::for_user(&env);
+        let prefix = mgr.wine_prefix("abc123");
+
+        assert!(
+            prefix.starts_with("/home/alice/.local/share/win-sandbox/prefixes"),
+            "prefix must live under the user's home, got {}",
+            prefix.display()
+        );
+        assert!(!prefix.starts_with("/root"), "must never use root's home");
+        assert!(
+            !prefix.starts_with("/tmp"),
+            "Wine refuses /tmp prefixes: 'not owned by you'"
+        );
+    }
+
+    /// XDG_DATA_HOME takes priority over HOME when the user sets it.
+    #[test]
+    fn for_user_prefers_xdg_data_home() {
+        let mut env = std::collections::HashMap::new();
+        env.insert("HOME".to_string(), "/home/alice".to_string());
+        env.insert("XDG_DATA_HOME".to_string(), "/home/alice/data".to_string());
+
+        let mgr = PrefixManager::for_user(&env);
+        assert!(mgr
+            .wine_prefix("abc123")
+            .starts_with("/home/alice/data/win-sandbox/prefixes"));
+    }
+
+    /// Empty values are ignored rather than producing a relative path.
+    #[test]
+    fn for_user_ignores_empty_values() {
+        let mut env = std::collections::HashMap::new();
+        env.insert("XDG_DATA_HOME".to_string(), String::new());
+        env.insert("HOME".to_string(), "/home/bob".to_string());
+
+        let mgr = PrefixManager::for_user(&env);
+        assert!(mgr
+            .wine_prefix("h")
+            .starts_with("/home/bob/.local/share/win-sandbox/prefixes"));
+    }
+
+    /// With no forwarded env, behaviour matches the direct-CLI constructor.
+    #[test]
+    fn for_user_falls_back_to_process_env() {
+        let env = std::collections::HashMap::new();
+        assert_eq!(
+            PrefixManager::for_user(&env).wine_prefix("x"),
+            PrefixManager::new().wine_prefix("x")
+        );
+    }
 
     #[test]
     fn prefix_dir_structure() {

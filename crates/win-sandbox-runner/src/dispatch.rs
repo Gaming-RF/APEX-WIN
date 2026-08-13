@@ -69,7 +69,10 @@ pub fn execute(
 
     // --- Step 4: Per-app prefix management ---
     if let Some(ref entry) = matched_entry {
-        let prefix_mgr = crate::prefix::PrefixManager::new();
+        // Root the prefix at the *invoking user's* home. In daemon mode the
+        // process runs as root, where HOME is /root or unset, so relying on
+        // the ambient environment would create an unusable prefix.
+        let prefix_mgr = crate::prefix::PrefixManager::for_user(&args.user_env);
         let wine_prefix = prefix_mgr.setup_app(hash, entry.dxvk, &entry.winetricks, args.uid)?;
         std::env::set_var("WINEPREFIX", &wine_prefix);
         info!("WINEPREFIX: {}", wine_prefix.display());
