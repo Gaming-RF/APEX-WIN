@@ -30,23 +30,41 @@ pub fn run_with_network(args: &Args, network: bool) -> Result<ExitCode> {
     std::fs::create_dir_all(&dirs.work)?;
     std::fs::create_dir_all(&dirs.merged)?;
 
-    // The lowerdir is the existing wine prefix (or a minimal stub)
-    let lower_dir = resolve_lower_dir(&config.wine_prefix, &dirs.base)?;
+    // The lowerdir is the existing wine prefix (or a minimal stub).
+    // Prefer WINEPREFIX, which dispatch::execute has already resolved to the
+    // per-app prefix; config.wine_prefix is only the generic default.
+    let resolved_prefix =
+        std::env::var("WINEPREFIX").unwrap_or_else(|_| config.wine_prefix.clone());
+    let lower_dir = resolve_lower_dir(&resolved_prefix, &dirs.base)?;
 
     // Mount OverlayFS
     let opts = mount_opts(&lower_dir, &dirs.upper, &dirs.work);
     info!("Mounting OverlayFS: lower={lower_dir}, upper={}", dirs.upper);
 
-    let status = Command::new("mount")
+    let output = Command::new("mount")
         .args(["-t", "overlay", "overlay", "-o", &opts, &dirs.merged])
-        .status();
+        .output();
 
-    match status {
-        Ok(s) if s.success() => {
+    match output {
+        Ok(o) if o.status.success() => {
             info!("OverlayFS mounted at {}", dirs.merged);
         }
-        Ok(s) => {
-            bail!("OverlayFS mount failed with status: {s}");
+        Ok(o) => {
+            // mount(8) needs root for overlay. bubblewrap can do this
+            // unprivileged, but only from 0.10 (--overlay). Rather than fail
+            // the launch outright, fall back to Tier 2, which provides
+            // namespace isolation without needing an overlay mount.
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            if stderr.contains("must be superuser") || stderr.contains("Operation not permitted") {
+                warn!(
+                    "OverlayFS needs root (mount: {}). Falling back to Tier 2 \
+                     (bubblewrap namespace isolation, no ephemeral overlay).",
+                    stderr.trim()
+                );
+                let _ = std::fs::remove_dir_all(&dirs.base);
+                return crate::tier2::run_with_network(args, network);
+            }
+            bail!("OverlayFS mount failed with status: {} ({})", o.status, stderr.trim());
         }
         Err(e) => {
             bail!("Failed to execute mount: {e} (try running with sudo or use --tier 2)");
@@ -211,6 +229,32 @@ fn resolve_lower_dir(wine_prefix: &str, base_dir: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// mount(8) refuses overlay for non-root users. Tier 3 must recognise
+    /// this specific failure and degrade to Tier 2 rather than aborting the
+    /// launch, since bubblewrap only gained unprivileged --overlay in 0.10
+    /// (Zorin 18.1 ships 0.9.0).
+    #[test]
+    fn detects_root_required_mount_errors() {
+        let needs_root = [
+            "mount: /dev/shm/win-run-1/merged: must be superuser to use mount.",
+            "mount: Operation not permitted",
+        ];
+        for msg in needs_root {
+            assert!(
+                msg.contains("must be superuser") || msg.contains("Operation not permitted"),
+                "must classify {msg:?} as a privilege failure and fall back"
+            );
+        }
+
+        // A genuine failure must NOT be swallowed by the fallback path.
+        let real_failure = "mount: wrong fs type, bad option, bad superblock";
+        assert!(
+            !(real_failure.contains("must be superuser")
+                || real_failure.contains("Operation not permitted")),
+            "unrelated mount errors must still surface as errors"
+        );
+    }
 
     #[test]
     fn overlay_dirs_paths() {
