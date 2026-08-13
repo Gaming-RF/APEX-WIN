@@ -7,6 +7,8 @@ use tracing::debug;
 const ALLOWED_ENV_VARS: &[&str] = &[
     "DISPLAY",
     "WAYLAND_DISPLAY",
+    "XAUTHORITY",
+    "XDG_SESSION_TYPE",
     "HOME",
     "TERM",
     "USER",
@@ -65,8 +67,14 @@ pub fn build_sandbox_env(
         }
     }
 
-    // Always set WINEPREFIX from config
-    env.insert("WINEPREFIX".to_string(), config.wine_prefix.clone());
+    // WINEPREFIX resolution order (most specific wins):
+    //   1. WINEPREFIX already in env (set by dispatch for the per-app prefix)
+    //   2. user_env override (daemon mode)
+    //   3. config default (~/.wine)
+    // Never clobber an explicitly-resolved per-app prefix.
+    if !env.contains_key("WINEPREFIX") {
+        env.insert("WINEPREFIX".to_string(), config.wine_prefix.clone());
+    }
 
     // Set sanitized PATH
     env.insert("PATH".to_string(), build_sanitized_path());
@@ -127,6 +135,12 @@ fn random_hostname() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Serializes tests that mutate process-global environment variables.
+    /// Rust runs tests in parallel threads that share one environment, so
+    /// without this two env-mutating tests can observe each other's writes.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn sanitized_path_contains_system() {
@@ -143,6 +157,7 @@ mod tests {
 
     #[test]
     fn build_sandbox_env_has_wineprefix() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let config = Config::default();
         let env = build_sandbox_env(&config, None).unwrap();
         assert!(env.contains_key("WINEPREFIX"));
@@ -152,6 +167,7 @@ mod tests {
 
     #[test]
     fn build_sandbox_env_strips_secrets() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Set a secret env var
         std::env::set_var("AWS_SECRET_ACCESS_KEY", "supersecret");
         let config = Config::default();
@@ -180,5 +196,63 @@ mod tests {
         let env = build_sandbox_env(&config, Some(&user_env)).unwrap();
         assert_eq!(env.get("DISPLAY").unwrap(), ":0");
         assert!(!env.contains_key("SECRET_VAR"));
+    }
+
+    /// X11 sessions need XAUTHORITY or Wine cannot open the display.
+    /// GDM stores the cookie at /run/user/<uid>/gdm/Xauthority with no
+    /// ~/.Xauthority fallback, so dropping this var breaks every launch.
+    #[test]
+    fn build_sandbox_env_forwards_xauthority() {
+        let config = Config::default();
+        let mut user_env = HashMap::new();
+        user_env.insert(
+            "XAUTHORITY".to_string(),
+            "/run/user/1000/gdm/Xauthority".to_string(),
+        );
+        user_env.insert("XDG_SESSION_TYPE".to_string(), "x11".to_string());
+        let env = build_sandbox_env(&config, Some(&user_env)).unwrap();
+        assert_eq!(
+            env.get("XAUTHORITY").unwrap(),
+            "/run/user/1000/gdm/Xauthority",
+            "XAUTHORITY must reach Wine or X11 auth fails"
+        );
+        assert_eq!(env.get("XDG_SESSION_TYPE").unwrap(), "x11");
+    }
+
+    /// dispatch::execute resolves a per-app WINEPREFIX and exports it before
+    /// calling into a tier. The sanitizer must not overwrite it with the
+    /// config default, or every app collapses into one shared prefix.
+    #[test]
+    fn build_sandbox_env_preserves_per_app_wineprefix() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let per_app = "/home/u/.local/share/win-sandbox/prefixes/deadbeef/prefix";
+        std::env::set_var("WINEPREFIX", per_app);
+
+        let config = Config {
+            wine_prefix: "/home/u/.wine".to_string(),
+            ..Config::default()
+        };
+
+        let env = build_sandbox_env(&config, None).unwrap();
+        assert_eq!(
+            env.get("WINEPREFIX").unwrap(),
+            per_app,
+            "per-app prefix must survive sanitization"
+        );
+
+        std::env::remove_var("WINEPREFIX");
+    }
+
+    /// With nothing pre-set, the config default is still applied.
+    #[test]
+    fn build_sandbox_env_falls_back_to_config_wineprefix() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("WINEPREFIX");
+        let config = Config {
+            wine_prefix: "/home/u/.wine".to_string(),
+            ..Config::default()
+        };
+        let env = build_sandbox_env(&config, None).unwrap();
+        assert_eq!(env.get("WINEPREFIX").unwrap(), "/home/u/.wine");
     }
 }
