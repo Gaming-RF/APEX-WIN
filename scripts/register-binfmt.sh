@@ -1,18 +1,42 @@
 #!/bin/sh
-# register-binfmt.sh — Register APEX-WIN binfmt_misc handler for .exe files
-# Run as root. Called by install.sh or manually.
+# register-binfmt.sh — the single source of truth for the APEX-WIN binfmt_misc
+# handler. Every install path (Makefile, install.sh, .deb postinst) must call
+# this rather than writing its own registration string.
 #
-# This tells the kernel: "when someone tries to execute a .exe file,
-# run /usr/bin/win-sandbox-runner with the .exe path as an argument."
+# Rationale: the definition was previously duplicated across five files. The
+# same missing-mask bug was found and fixed independently in three of them,
+# because there was no one place to correct.
 #
-# The magic bytes \x4d\x5a are the MZ header — the PE executable signature
-# that all Windows .exe/.dll files start with.
+# Usage:
+#   register-binfmt.sh                 register (default)
+#   register-binfmt.sh --unregister    remove the handler
+#   register-binfmt.sh --print         print the definition, register nothing
+#
+# Env:
+#   BINDIR   install prefix for the interpreter (default /usr/bin)
+#
+# Run as root, except for --print.
 
 set -e
 
-BIN="/usr/bin/win-sandbox-runner"
+BINDIR="${BINDIR:-/usr/bin}"
+BIN="${BINDIR}/win-sandbox-runner"
 BINFMT_DIR="/proc/sys/fs/binfmt_misc"
 NAME="APEX-WIN"
+
+# Format: :name:type:offset:magic:mask:interpreter:flags
+#   type = M      magic match
+#   offset = 0    check at byte 0
+#   magic = 4d5a  the MZ header every PE file starts with
+#   mask  = ffff  REQUIRED. Omitting it makes the kernel reject the whole
+#                 registration with EINVAL ("Invalid argument").
+#   flags = CF    C = credential inheritance, F = fix binary
+DEFINITION=":${NAME}:M:0:\\x4d\\x5a:\\xff\\xff:${BIN}:CF"
+
+if [ "$1" = "--print" ]; then
+    echo "$DEFINITION"
+    exit 0
+fi
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "Error: must run as root" >&2
@@ -25,45 +49,40 @@ if [ ! -d "$BINFMT_DIR" ]; then
     exit 1
 fi
 
+# The kernel expects "-1" to remove a handler. "-" is silently not the same.
+unregister() {
+    if [ -f "$BINFMT_DIR/$NAME" ]; then
+        echo -1 > "$BINFMT_DIR/$NAME"
+        echo "✓ binfmt_misc unregistered: $NAME removed"
+    else
+        echo "binfmt_misc: $NAME not registered (nothing to do)"
+    fi
+}
+
+if [ "$1" = "--unregister" ]; then
+    unregister
+    exit 0
+fi
+
 if [ ! -x "$BIN" ]; then
     echo "Error: $BIN not found or not executable" >&2
-    echo "Run install.sh first, or copy the binary to /usr/bin/" >&2
+    echo "Install the binary first (make quick-install), or set BINDIR." >&2
     exit 1
 fi
 
-# Unregister existing handler if present
+# Replace any existing registration so re-running is idempotent.
 if [ -f "$BINFMT_DIR/$NAME" ]; then
-    echo "-" > "$BINFMT_DIR/$NAME"
-    echo "Unregistered existing $NAME handler"
+    echo -1 > "$BINFMT_DIR/$NAME"
 fi
 
-# Register new handler
-# Format: :name:type:offset:magic:mask:interpreter:flags
-#   name = APEX-WIN
-#   type = M (magic match)
-#   offset = 0 (check at byte 0)
-#   magic = 4d5a (MZ header)
-#   mask = ffff (match both bytes)
-#   interpreter = /usr/bin/win-sandbox-runner
-#   flags = CF (C = credential inheritance, F = fix binary)
-echo ":${NAME}:M:0:\\x4d\\x5a:\\xff\\xff:${BIN}:CF" > "$BINFMT_DIR/register"
+echo "$DEFINITION" > "$BINFMT_DIR/register"
 
-# Verify registration
 if [ -f "$BINFMT_DIR/$NAME" ]; then
     echo "✓ binfmt_misc registered: .exe -> $BIN"
-    echo "  Status: $(cat "$BINFMT_DIR/$NAME")"
     echo ""
-    echo "Any .exe file can now be run directly:"
-    echo "  /path/to/app.exe"
-    echo ""
-    echo "To unregister: $0 --unregister"
+    echo "Any .exe can now be run directly:  /path/to/app.exe"
+    echo "To unregister:                     $0 --unregister"
 else
     echo "Error: registration failed" >&2
     exit 1
-fi
-
-# Handle --unregister flag
-if [ "$1" = "--unregister" ]; then
-    echo "-" > "$BINFMT_DIR/$NAME"
-    echo "✓ binfmt_misc unregistered: $NAME removed"
 fi

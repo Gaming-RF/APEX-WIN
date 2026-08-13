@@ -126,14 +126,15 @@ install_config() {
 
 install_binfmt() {
     info "Installing binfmt handler..."
-    # Single source of truth for the handler definition. The \xff\xff mask is
-    # required: without it the kernel rejects the registration with EINVAL.
+    # The definition comes from register-binfmt.sh --print: one place knows the
+    # format. It was previously duplicated and the same missing-mask bug (which
+    # makes the kernel return EINVAL) had to be fixed three separate times.
     install -d "${DESTDIR:-}${BINFMET_DIR}"
-    printf ':APEX-WIN:M:0:\\x4d\\x5a:\\xff\\xff:%s/win-sandbox-runner:CF\n' "${BINDIR}" \
+    BINDIR="${BINDIR}" sh scripts/register-binfmt.sh --print \
         > "${DESTDIR:-}${BINFMET_DIR}/apex-win.conf"
     # Also register immediately (more reliable than waiting for systemd-binfmt)
     if [[ -d /proc/sys/fs/binfmt_misc ]]; then
-        bash scripts/register-binfmt.sh
+        BINDIR="${BINDIR}" sh scripts/register-binfmt.sh
     fi
 }
 

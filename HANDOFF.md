@@ -233,12 +233,14 @@ Resolved since the first draft of this document:
 
 Still open:
 
-1. **binfmt definition is duplicated across 5 sites** — Makefile (x3),
-   scripts/install.sh, scripts/build-deb.sh, plus daemon.rs and
-   register-binfmt.sh. The same missing-mask bug (kernel returns EINVAL without
-   `\xff\xff`) has now been found and fixed independently in three of them,
-   because there is no single source of truth. Collapse to one definition: have
-   every path shell out to `register-binfmt.sh`, or generate the string once.
+1. ~~binfmt definition duplicated across 5 sites~~ — **fixed.**
+   `scripts/register-binfmt.sh` is now the single source (`--print` emits the
+   definition, `BINDIR=` overrides the prefix). Makefile, install.sh and the
+   .deb postinst all call it. daemon.rs keeps its own copy on purpose, since it
+   registers at startup and cannot assume the script is installed; two tests
+   (`binfmt_definition_matches_script`, `binfmt_registration_carries_mask`)
+   assert the copies stay identical. The guard was verified by proving it
+   fails when the script diverges.
 
 2. ~~Daemon FIFO path (Path B) broken~~ — **fixed and verified.** Both launch
    paths now map a real window.

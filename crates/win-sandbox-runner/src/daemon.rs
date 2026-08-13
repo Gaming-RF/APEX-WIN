@@ -116,6 +116,20 @@ fn cleanup_runtime() {
     let _ = std::fs::remove_file(pid_path());
 }
 
+/// The binfmt_misc registration line for the APEX-WIN handler.
+///
+/// This duplicates `scripts/register-binfmt.sh` on purpose: the daemon
+/// registers at startup and cannot assume the script is installed. Every
+/// *other* path (Makefile, install.sh, .deb postinst) must call that script
+/// rather than inlining a copy.
+///
+/// The `\xff\xff` mask is mandatory. Without it the kernel rejects the whole
+/// registration with EINVAL. That bug recurred three times while this string
+/// was duplicated across five files, so `binfmt_definition_matches_script`
+/// asserts this constant stays byte-identical to the script's `--print`.
+const BINFMT_REGISTRATION: &str =
+    ":APEX-WIN:M:0:\\x4d\\x5a:\\xff\\xff:/usr/bin/win-sandbox-runner:CF";
+
 /// Register the binfmt_misc handler for .exe files.
 ///
 /// This tells the kernel: "when someone tries to execute a .exe file,
@@ -141,8 +155,7 @@ fn register_binfmt() -> Result<()> {
     //
     // We use C (credential inheritance) and F (fix binary) flags.
     // C ensures the runner inherits the credentials of the user who launched the exe.
-    let registration =
-        ":APEX-WIN:M:0:\\x4d\\x5a:\\xff\\xff:/usr/bin/win-sandbox-runner:CF\n".to_string();
+    let registration = format!("{BINFMT_REGISTRATION}\n");
 
     // First, unregister if already registered
     let status_path = binfmt_dir.join("APEX-WIN");
@@ -723,5 +736,63 @@ mod tests {
     fn parse_launch_message_rejects_empty() {
         assert!(parse_launch_message(&[]).is_none());
         assert!(parse_launch_message(&["".to_string()]).is_none());
+    }
+
+    /// The daemon and scripts/register-binfmt.sh both define the registration
+    /// line, because the daemon cannot assume the script is installed. This
+    /// test is what keeps that duplication honest: it runs the script's
+    /// --print and asserts byte equality with the Rust constant.
+    ///
+    /// Without it, the two drift. The missing-\xff\xff-mask bug (kernel returns
+    /// EINVAL) was found and fixed three separate times precisely because
+    /// nothing compared the copies.
+    #[test]
+    fn binfmt_definition_matches_script() {
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/register-binfmt.sh");
+
+        // Skip rather than fail when the script is absent (e.g. installed
+        // crate, vendored build) so this cannot produce a false failure.
+        if !script.exists() {
+            eprintln!("skip: {} not present", script.display());
+            return;
+        }
+
+        let out = std::process::Command::new("sh")
+            .arg(&script)
+            .arg("--print")
+            .output()
+            .expect("failed to run register-binfmt.sh --print");
+
+        assert!(
+            out.status.success(),
+            "register-binfmt.sh --print failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let from_script = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        assert_eq!(
+            from_script, BINFMT_REGISTRATION,
+            "binfmt definition drifted between daemon.rs and register-binfmt.sh"
+        );
+    }
+
+    /// Guards the specific field that has broken three times.
+    #[test]
+    fn binfmt_registration_carries_mask() {
+        let fields: Vec<&str> = BINFMT_REGISTRATION.split(':').collect();
+        // :name:type:offset:magic:mask:interpreter:flags -> leading empty field
+        assert_eq!(fields.len(), 8, "unexpected field count: {fields:?}");
+        assert_eq!(fields[1], "APEX-WIN");
+        assert_eq!(fields[2], "M", "must be a magic match");
+        assert_eq!(fields[3], "0", "magic is at offset 0");
+        assert_eq!(fields[4], r"\x4d\x5a", "MZ header");
+        assert_eq!(
+            fields[5], r"\xff\xff",
+            "mask must be present or the kernel rejects with EINVAL"
+        );
+        assert!(fields[6].ends_with("win-sandbox-runner"));
+        assert!(fields[7].contains('C'), "C = credential inheritance");
+        assert!(fields[7].contains('F'), "F = fix binary");
     }
 }

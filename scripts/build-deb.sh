@@ -69,15 +69,13 @@ set -euo pipefail
 
 echo "Setting up win-sandbox-runner..."
 
-# Register binfmt_misc handler (APEX-WIN name, MZ header, with mask)
-BINFMT_DIR="/proc/sys/fs/binfmt_misc"
-if [[ -d "$BINFMT_DIR" ]]; then
-    # Remove old handler if present
-    if [[ -f "$BINFMT_DIR/APEX-WIN" ]]; then
-        echo -1 > "$BINFMT_DIR/APEX-WIN" 2>/dev/null || true
-    fi
-    # Register: name=APEX-WIN, type=M (magic), offset=0, magic=MZ, mask=\xff\xff
-    echo ":APEX-WIN:M:0:\x4d\x5a:\xff\xff:/usr/bin/win-sandbox-runner:CF" > "$BINFMT_DIR/register" 2>/dev/null && \
+# Register binfmt_misc handler via the shipped script, which is the single
+# source of truth for the definition. Do not inline the registration string
+# here: it was previously duplicated across five files and the same
+# missing-mask bug (kernel returns EINVAL) had to be fixed three times.
+REGISTER_SH="/usr/share/win-sandbox-runner/scripts/register-binfmt.sh"
+if [[ -d /proc/sys/fs/binfmt_misc ]] && [[ -f "$REGISTER_SH" ]]; then
+    sh "$REGISTER_SH" >/dev/null 2>&1 && \
         echo "binfmt_misc handler registered (.exe -> win-sandbox-runner)" || \
         echo "WARN: Failed to register binfmt handler"
 fi

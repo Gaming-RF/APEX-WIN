@@ -79,13 +79,11 @@ install-ebpf: $(EBPF_OBJ) $(EBPF_LOADER)
 	install -Dm644 $(EBPF_OBJ) $(DESTDIR)$(LIBDIR)/win_tap_filter/win_tap_filter.bpf.o
 
 install-binfmt:
-	@# Registers the same APEX-WIN handler quick-install uses, persisted via
-	@# /etc/binfmt.d so it survives reboot. The magic MUST carry the \xff\xff
-	@# mask: without it the kernel rejects the registration with EINVAL.
-	@# A second handler for the same MZ magic would fight this one, so there
-	@# is exactly one definition and it lives here.
+	@# Persist the definition in /etc/binfmt.d so it survives reboot. The string
+	@# comes from register-binfmt.sh --print so there is exactly one place that
+	@# knows the format (the missing-mask bug recurred 3x when it was duplicated).
 	install -d $(DESTDIR)$(BINFMET_DIR)
-	printf ':APEX-WIN:M:0:\\x4d\\x5a:\\xff\\xff:$(BINDIR)/win-sandbox-runner:CF\n' \
+	BINDIR=$(BINDIR) sh scripts/register-binfmt.sh --print \
 		> $(DESTDIR)$(BINFMET_DIR)/apex-win.conf
 
 install-systemd:
@@ -154,9 +152,10 @@ quick-install: cargo-release
 	@sudo install -m 644 config/rules.json /etc/win-sandbox-runner/rules.json
 	@sudo install -m 644 config/net-optimizer.json /etc/win-sandbox-runner/net-optimizer.json
 	@# Register binfmt_misc
+	@# Single source of truth for the handler definition (see the comment at
+	@# the top of register-binfmt.sh for why this is not inlined here).
 	@if [ -d /proc/sys/fs/binfmt_misc ]; then \
-		echo -1 | sudo tee /proc/sys/fs/binfmt_misc/APEX-WIN > /dev/null 2>&1 || true; \
-		echo ":APEX-WIN:M:0:\\x4d\\x5a:\\xff\\xff:$(BINDIR)/win-sandbox-runner:CF" | sudo tee /proc/sys/fs/binfmt_misc/register > /dev/null 2>&1 && \
+		BINDIR=$(BINDIR) sudo -E sh scripts/register-binfmt.sh >/dev/null 2>&1 && \
 		echo "✓ binfmt_misc registered (.exe -> win-sandbox-runner)" || \
 		echo "WARN: Failed to register binfmt handler"; \
 	fi
@@ -177,10 +176,9 @@ cargo-install: cargo-release install-bridge install-ebpf install-dll install-bin
 	install -m 644 config/rules.json $(DESTDIR)$(CONFDIR)/
 	install -m 644 config/appdb.json $(DESTDIR)$(CONFDIR)/
 	install -m 644 config/rules.schema.json $(DESTDIR)$(CONFDIR)/
-	@# Register binfmt_misc
+	@# Register binfmt_misc via the single source of truth
 	@if [ -d /proc/sys/fs/binfmt_misc ]; then \
-		echo -1 > /proc/sys/fs/binfmt_misc/APEX-WIN 2>/dev/null || true; \
-		echo ":APEX-WIN:M:0:\\x4d\\x5a:\\xff\\xff:$(DESTDIR)$(BINDIR)/win-sandbox-runner:CF" > /proc/sys/fs/binfmt_misc/register 2>/dev/null && \
+		BINDIR=$(DESTDIR)$(BINDIR) sh scripts/register-binfmt.sh >/dev/null 2>&1 && \
 		echo "binfmt_misc handler registered (.exe -> win-sandbox-runner)" || \
 		echo "WARN: Failed to register binfmt handler (run register-binfmt.sh manually)"; \
 	fi
