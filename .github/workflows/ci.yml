@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fail fast on warnings rather than letting them accumulate.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    name: build / test / lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # win-sandbox-gui links against GTK4 and libadwaita, so the runner needs
+      # the -dev packages or the build fails at pkg-config, not at compile.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev libadwaita-1-dev pkg-config
+
+      # rust-version in Cargo.toml is 1.75. Pin to stable and let dependabot or
+      # a human bump it deliberately, rather than drifting with the runner image.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      # --all-targets so tests and benches are linted too. Several real bugs in
+      # this project were only visible in test code.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --verbose
+
+      - name: Build release
+        run: cargo build --release --workspace
+
+  # The tiers need Landlock, bubblewrap, Wine and an X display, none of which
+  # exist on a stock runner. These scripts are written to skip (exit 0) when
+  # their prerequisites are missing, so this job proves the harness itself is
+  # not broken. Real tier verification happens on a desktop.
+  integration-smoke:
+    name: integration scripts (skip-safe)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev libadwaita-1-dev pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build debug binary
+        run: cargo build -p win-sandbox-runner
+
+      - name: Shell syntax check
+        run: |
+          for f in scripts/*.sh tests/integration/*.sh; do
+            bash -n "$f" || exit 1
+          done
+          echo "all shell scripts parse"
+
+      - name: Run integration scripts
+        run: |
+          for t in tests/integration/*.sh; do
+            echo "--- $t ---"
+            bash "$t" || exit 1
+          done
