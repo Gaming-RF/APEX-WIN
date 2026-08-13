@@ -127,7 +127,9 @@ pub fn warn_display_security(mode: &DisplayMode) {
             info!("Using Xvfb (virtual framebuffer) — no visible window.");
         }
         DisplayMode::Wayland => {
-            info!("Using Wayland native — Wine Wayland support is experimental.");
+            warn!("Using Wayland native — Wine Wayland support is EXPERIMENTAL.");
+            warn!("Many Windows apps may not render correctly or may crash.");
+            warn!("If you encounter issues, try --nested-x11 or --host-x11.");
         }
     }
 }

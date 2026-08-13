@@ -1,6 +1,6 @@
 # APEX-WIN Handoff Document
 
-**Last updated**: 2026-08-13 — acceptance verified (real GUI window confirmed)
+**Last updated**: 2026-08-13 — fixes for embedded configs, .deb, Wayland warning
 **Repository**: https://github.com/Gaming-RF/APEX-WIN
 **Branch**: main (HEAD at `237780d`)
 
@@ -217,17 +217,14 @@ Resolved since the first draft of this document:
 - ~~Wine prefix created as root~~ → prefix ownership fixed (`ad2cbd6`)
 - ~~`XAUTHORITY` stripped by sanitizer~~ → added to allowlist (`237780d`)
 - ~~`WINEPREFIX` clobbered by config default~~ → config is now fallback only (`237780d`)
+- ~~No .deb package~~ → `scripts/build-deb.sh` updated for v0.3.0 (correct paths, service file, MIME handler, net-optimizer.json)
+- ~~`appdb.json` not truly embedded~~ → `load_embedded()` now uses `include_str!` fallback, always available even if /etc is missing
+- ~~`rules.json` not embedded~~ → `load_rules()` now uses `include_str!` fallback
+- ~~Wayland warning too weak~~ → Now warns about experimental Wine Wayland support
 
 Still open:
 
-1. **No .deb package** — `make deb` target exists but was not updated for v0.3.0.
-
-2. **`appdb.json` not truly embedded** — `load_embedded()` reads from the filesystem
-   rather than `include_str!`. Works because `make quick-install` copies configs to
-   `/etc/win-sandbox-runner/`, but a missing config dir silently degrades to an
-   empty database.
-
-3. **Daemon FIFO path (Path B) needs the fixed binary installed** — Path B was
+1. **Daemon FIFO path (Path B) needs the fixed binary installed** — Path B was
    re-tested and *reproduced* the original failure, because `/usr/bin/win-sandbox-runner`
    is still the stale pre-fix build:
 
@@ -242,7 +239,7 @@ Still open:
    code change is expected — Path B just needs `make quick-install` to deploy the
    current binary, then one `xwininfo` re-check.
 
-4. **Tier 3 has no ephemeral overlay on this host** — Tier 2 and Tier 3 are now
+2. **Tier 3 has no ephemeral overlay on this host** — Tier 2 and Tier 3 are now
    acceptance-tested. Tier 2 works: it starts Xephyr on `:1`, runs bwrap, and
    `DISPLAY=:1 xwininfo` shows the app window while the user sees the Xephyr
    window on `:0`.
@@ -254,8 +251,9 @@ Still open:
    ephemeral-overlay isolation**. To get real Tier 3, either ship bubblewrap
    >= 0.10 and switch to `--overlay`, or grant the mount via a setuid helper.
 
-5. **Wayland path untested** — verification was on X11 (`XDG_SESSION_TYPE=x11`).
-   A Wayland session takes a different Wine driver path.
+3. **Wayland path untested** — verification was on X11 (`XDG_SESSION_TYPE=x11`).
+   A Wayland session takes a different Wine driver path. A warning is now emitted
+   when `--wayland` is used.
 
 ### Debugging note
 

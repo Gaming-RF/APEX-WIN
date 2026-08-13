@@ -1,9 +1,15 @@
 #!/bin/bash
-# Build a .deb package for win-sandbox-runner
+# Build a .deb package for win-sandbox-runner (v0.3.0+)
 # Usage: ./scripts/build-deb.sh [version]
 set -euo pipefail
 
-VERSION="${1:-0.1.0}"
+# Auto-detect version from Cargo.toml if not provided
+if [[ -z "${1:-}" ]]; then
+    VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+else
+    VERSION="$1"
+fi
+
 ARCH="${2:-amd64}"
 PKG_NAME="win-sandbox-runner"
 DEB_DIR="target/deb"
@@ -20,9 +26,11 @@ fi
 # Clean and create package structure
 rm -rf "$DEB_DIR"
 mkdir -p "$PKG_DIR/DEBIAN"
-mkdir -p "$PKG_DIR/usr/local/bin"
-mkdir -p "$PKG_DIR/usr/share/win-sandbox-runner"
+mkdir -p "$PKG_DIR/usr/bin"
+mkdir -p "$PKG_DIR/usr/share/applications"
+mkdir -p "$PKG_DIR/usr/share/win-sandbox-runner/scripts"
 mkdir -p "$PKG_DIR/etc/win-sandbox-runner"
+mkdir -p "$PKG_DIR/etc/systemd/system"
 
 # --- DEBIAN/control ---
 cat > "$PKG_DIR/DEBIAN/control" << EOF
@@ -39,16 +47,19 @@ Description: Transparent tiered sandbox for Windows apps on Linux
  Run Windows executables via Wine with automatic sandboxing.
  Supports 4 isolation tiers (none, Landlock, Bubblewrap, OverlayFS),
  automatic Wine prefix management, DXVK installation, and a built-in
- app database with 30+ known-good profiles.
+ app database with 35+ known-good profiles.
  .
  Features:
   - Transparent .exe interception via binfmt_misc
+  - File manager double-click support via MIME handler
+  - Background daemon with FIFO-based dispatch
   - Per-app Wine prefix management
   - Automatic DXVK and winetricks setup
   - Built-in app database (Fusion 360, Steam, Office, games, etc.)
   - GTK4 GUI for trust decisions
   - Network isolation via TAP bridge
   - GPU passthrough support
+  - Native Linux network optimizer (BBR, fq_codel, DSCP)
 EOF
 
 # --- DEBIAN/postinst ---
@@ -58,14 +69,32 @@ set -euo pipefail
 
 echo "Setting up win-sandbox-runner..."
 
-# Register binfmt_misc handler
+# Register binfmt_misc handler (APEX-WIN name, MZ header, with mask)
 BINFMT_DIR="/proc/sys/fs/binfmt_misc"
 if [[ -d "$BINFMT_DIR" ]]; then
-    if [[ -f "$BINFMT_DIR/win-sandbox-runner" ]]; then
-        echo -1 > "$BINFMT_DIR/win-sandbox-runner" 2>/dev/null || true
+    # Remove old handler if present
+    if [[ -f "$BINFMT_DIR/APEX-WIN" ]]; then
+        echo -1 > "$BINFMT_DIR/APEX-WIN" 2>/dev/null || true
     fi
-    echo ":win-sandbox-runner:E::exe::/usr/local/bin/win-sandbox-runner:" > "$BINFMT_DIR/register" 2>/dev/null || true
-    echo "binfmt_misc handler registered"
+    # Register: name=APEX-WIN, type=M (magic), offset=0, magic=MZ, mask=\xff\xff
+    echo ":APEX-WIN:M:0:\x4d\x5a:\xff\xff:/usr/bin/win-sandbox-runner:CF" > "$BINFMT_DIR/register" 2>/dev/null && \
+        echo "binfmt_misc handler registered (.exe -> win-sandbox-runner)" || \
+        echo "WARN: Failed to register binfmt handler"
+fi
+
+# Install desktop MIME handler for double-click support
+if [[ -f /usr/share/applications/apex-win.desktop ]]; then
+    update-desktop-database /usr/share/applications 2>/dev/null || true
+    
+    # Register as default handler for PE MIME types
+    for m in application/vnd.microsoft.portable-executable application/x-ms-dos-executable application/x-msdownload application/x-msi; do
+        if [[ -n "${SUDO_USER:-}" ]]; then
+            sudo -u "$SUDO_USER" xdg-mime default apex-win.desktop "$m" 2>/dev/null || true
+        else
+            xdg-mime default apex-win.desktop "$m" 2>/dev/null || true
+        fi
+    done
+    echo "Double-click handler registered for .exe files"
 fi
 
 # Create user config directory for the installing user
@@ -78,35 +107,58 @@ if [[ -n "${SUDO_USER:-}" ]]; then
     chown -R "$SUDO_USER:" "$USER_CONF"
 fi
 
+# Reload systemd
+systemctl daemon-reload 2>/dev/null || true
+
 echo ""
-echo "win-sandbox-runner installed! Run any .exe to get started."
-echo "  win-sandbox-runner --exe app.exe"
-echo "  win-sandbox-runner --exe app.exe --trust"
+echo "win-sandbox-runner installed! Start the daemon:"
+echo "  sudo systemctl enable --now win-sandbox-runner"
+echo ""
+echo "Then run any .exe:"
+echo "  /path/to/program.exe"
 POSTINST
 chmod 755 "$PKG_DIR/DEBIAN/postinst"
 
 # --- DEBIAN/prerm ---
 cat > "$PKG_DIR/DEBIAN/prerm" << 'PRERM'
 #!/bin/bash
-# Remove binfmt handler on uninstall
-if [[ -f /proc/sys/fs/binfmt_misc/win-sandbox-runner ]]; then
-    echo -1 > /proc/sys/fs/binfmt_misc/win-sandbox-runner 2>/dev/null || true
+# Stop daemon and remove binfmt handler on uninstall
+systemctl stop win-sandbox-runner 2>/dev/null || true
+systemctl disable win-sandbox-runner 2>/dev/null || true
+
+if [[ -f /proc/sys/fs/binfmt_misc/APEX-WIN ]]; then
+    echo -1 > /proc/sys/fs/binfmt_misc/APEX-WIN 2>/dev/null || true
 fi
 PRERM
 chmod 755 "$PKG_DIR/DEBIAN/prerm"
 
+# --- DEBIAN/postrm ---
+cat > "$PKG_DIR/DEBIAN/postrm" << 'POSTRM'
+#!/bin/bash
+# Reload systemd after removal
+systemctl daemon-reload 2>/dev/null || true
+POSTRM
+chmod 755 "$PKG_DIR/DEBIAN/postrm"
+
 # --- Install files ---
-cp target/release/win-sandbox-runner "$PKG_DIR/usr/local/bin/"
-cp target/release/win-sandbox-gui "$PKG_DIR/usr/local/bin/"
+# Binaries
+cp target/release/win-sandbox-runner "$PKG_DIR/usr/bin/"
+cp target/release/win-sandbox-gui "$PKG_DIR/usr/bin/"
+
+# Config files
 cp config/rules.json "$PKG_DIR/etc/win-sandbox-runner/"
 cp config/appdb.json "$PKG_DIR/etc/win-sandbox-runner/"
 cp config/rules.schema.json "$PKG_DIR/etc/win-sandbox-runner/"
+cp config/net-optimizer.json "$PKG_DIR/etc/win-sandbox-runner/"
 
-# Copy helper scripts
-if [[ -d scripts ]]; then
-    mkdir -p "$PKG_DIR/usr/share/win-sandbox-runner/scripts"
-    cp scripts/*.sh "$PKG_DIR/usr/share/win-sandbox-runner/scripts/" 2>/dev/null || true
-fi
+# Desktop MIME handler
+cp scripts/apex-win.desktop "$PKG_DIR/usr/share/applications/"
+
+# systemd service
+cp scripts/win-sandbox-runner.service "$PKG_DIR/etc/systemd/system/"
+
+# Helper scripts
+cp scripts/*.sh "$PKG_DIR/usr/share/win-sandbox-runner/scripts/" 2>/dev/null || true
 
 # --- Build .deb ---
 dpkg-deb --build "$PKG_DIR"

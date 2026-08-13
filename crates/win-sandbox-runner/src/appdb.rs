@@ -54,6 +54,12 @@ impl AppDatabase {
     }
 
     /// Load the embedded app database (compiled into the binary).
+    ///
+    /// Search order:
+    /// 1. User config: ~/.config/win-sandbox/appdb.json
+    /// 2. System config: /etc/win-sandbox-runner/appdb.json
+    /// 3. Compiled-in fallback: include_str!("../../../config/appdb.json")
+    /// 4. Dev tree: config/appdb.json (relative to CWD)
     pub fn load_embedded() -> Self {
         // Try to load from the config directory first
         let search_paths = [
@@ -71,7 +77,17 @@ impl AppDatabase {
             }
         }
 
-        // Fallback: load from the source tree (development)
+        // Compiled-in fallback: always available, even if /etc is missing
+        const EMBEDDED: &str = include_str!("../../../config/appdb.json");
+        match serde_json::from_str::<Self>(EMBEDDED) {
+            Ok(db) => {
+                info!("Loaded compiled-in app database: {} profiles", db.profiles.len());
+                return db;
+            }
+            Err(e) => warn!("Failed to parse compiled-in appdb: {e}"),
+        }
+
+        // Dev tree fallback (only works when running from source directory)
         let dev_path = Path::new("config/appdb.json");
         if dev_path.exists() {
             match Self::load(dev_path) {

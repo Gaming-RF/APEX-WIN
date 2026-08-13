@@ -1,26 +1,70 @@
 use anyhow::{Context, Result};
 use std::path::Path;
-use tracing::debug;
+use tracing::{debug, info, warn};
 use win_sandbox_common::rules_schema::RulesFile;
 
 /// Load and validate a rules file from the given path.
-/// If no path is provided, returns the default rules.
+/// If no path is provided, searches for rules.json in standard locations,
+/// then falls back to the compiled-in default.
 pub fn load_rules(path: Option<&Path>) -> Result<RulesFile> {
-    match path {
-        Some(p) => {
-            debug!("Loading rules from: {}", p.display());
-            let data = std::fs::read_to_string(p)
-                .with_context(|| format!("Failed to read rules file: {}", p.display()))?;
-            let rules: RulesFile = serde_json::from_str(&data)
-                .with_context(|| format!("Failed to parse rules file: {}", p.display()))?;
-            validate_rules(&rules)?;
-            Ok(rules)
-        }
-        None => {
-            debug!("No rules file specified, using defaults");
-            Ok(default_rules())
+    if let Some(p) = path {
+        debug!("Loading rules from: {}", p.display());
+        let data = std::fs::read_to_string(p)
+            .with_context(|| format!("Failed to read rules file: {}", p.display()))?;
+        let rules: RulesFile = serde_json::from_str(&data)
+            .with_context(|| format!("Failed to parse rules file: {}", p.display()))?;
+        validate_rules(&rules)?;
+        return Ok(rules);
+    }
+
+    // Search standard locations
+    let search_paths = [
+        "~/.config/win-sandbox/rules.json",
+        "/etc/win-sandbox-runner/rules.json",
+    ];
+
+    for path_str in &search_paths {
+        let expanded = expand_tilde(path_str);
+        if expanded.exists() {
+            match std::fs::read_to_string(&expanded) {
+                Ok(data) => match serde_json::from_str::<RulesFile>(&data) {
+                    Ok(rules) => {
+                        if validate_rules(&rules).is_ok() {
+                            info!("Loaded rules from: {}", expanded.display());
+                            return Ok(rules);
+                        }
+                    }
+                    Err(e) => warn!("Failed to parse {path_str}: {e}"),
+                },
+                Err(e) => warn!("Failed to read {path_str}: {e}"),
+            }
         }
     }
+
+    // Compiled-in fallback
+    const EMBEDDED: &str = include_str!("../../../config/rules.json");
+    match serde_json::from_str::<RulesFile>(EMBEDDED) {
+        Ok(rules) => {
+            if validate_rules(&rules).is_ok() {
+                info!("Using compiled-in default rules");
+                return Ok(rules);
+            }
+        }
+        Err(e) => warn!("Failed to parse compiled-in rules: {e}"),
+    }
+
+    debug!("No rules file found, using empty defaults");
+    Ok(default_rules())
+}
+
+/// Expand ~ to $HOME in a path string.
+fn expand_tilde(path: &str) -> std::path::PathBuf {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return std::path::PathBuf::from(format!("{home}/{rest}"));
+        }
+    }
+    std::path::PathBuf::from(path)
 }
 
 /// Return default rules (no entries, permissive defaults).
@@ -97,9 +141,10 @@ mod tests {
     }
 
     #[test]
-    fn load_nonexistent_returns_default() {
+    fn load_nonexistent_returns_embedded_or_default() {
         let rules = load_rules(None).unwrap();
         assert_eq!(rules.version, 1);
-        assert!(rules.entries.is_empty());
+        // With embedded fallback, we get the compiled-in rules (which have entries)
+        // rather than empty defaults. This is the desired behavior.
     }
 }
