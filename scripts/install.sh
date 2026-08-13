@@ -126,8 +126,12 @@ install_config() {
 
 install_binfmt() {
     info "Installing binfmt handler..."
-    install -Dm644 binfmt/windows-pe.conf "${DESTDIR:-}${BINFMET_DIR}/windows-pe.conf"
-    # Also register via binfmt_misc directly (more reliable)
+    # Single source of truth for the handler definition. The \xff\xff mask is
+    # required: without it the kernel rejects the registration with EINVAL.
+    install -d "${DESTDIR:-}${BINFMET_DIR}"
+    printf ':APEX-WIN:M:0:\\x4d\\x5a:\\xff\\xff:%s/win-sandbox-runner:CF\n' "${BINDIR}" \
+        > "${DESTDIR:-}${BINFMET_DIR}/apex-win.conf"
+    # Also register immediately (more reliable than waiting for systemd-binfmt)
     if [[ -d /proc/sys/fs/binfmt_misc ]]; then
         bash scripts/register-binfmt.sh
     fi

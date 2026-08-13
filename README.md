@@ -290,9 +290,7 @@ sudo nano /etc/win-sandbox-runner/rules.json
 .
 ├── Cargo.toml                   # Workspace root
 ├── Makefile                     # C component builds
-├── PLAN.md                      # Architecture plan
-├── binfmt/
-│   └── windows-pe.conf          # binfmt_misc registration
+├── HANDOFF.md                   # Architecture, bug history, gotchas
 ├── config/
 │   ├── apparmor/                # AppArmor profile
 │   ├── rules.json               # Default sandbox rules

@@ -79,7 +79,14 @@ install-ebpf: $(EBPF_OBJ) $(EBPF_LOADER)
 	install -Dm644 $(EBPF_OBJ) $(DESTDIR)$(LIBDIR)/win_tap_filter/win_tap_filter.bpf.o
 
 install-binfmt:
-	install -Dm644 binfmt/windows-pe.conf $(DESTDIR)$(BINFMET_DIR)/windows-pe.conf
+	@# Registers the same APEX-WIN handler quick-install uses, persisted via
+	@# /etc/binfmt.d so it survives reboot. The magic MUST carry the \xff\xff
+	@# mask: without it the kernel rejects the registration with EINVAL.
+	@# A second handler for the same MZ magic would fight this one, so there
+	@# is exactly one definition and it lives here.
+	install -d $(DESTDIR)$(BINFMET_DIR)
+	printf ':APEX-WIN:M:0:\\x4d\\x5a:\\xff\\xff:$(BINDIR)/win-sandbox-runner:CF\n' \
+		> $(DESTDIR)$(BINFMET_DIR)/apex-win.conf
 
 install-systemd:
 	install -Dm644 scripts/win-sandbox-runner.service $(DESTDIR)$(SYSTEMD_DIR)/win-sandbox-runner.service

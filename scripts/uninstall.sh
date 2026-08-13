@@ -35,9 +35,17 @@ systemctl disable win-tap-bridge.service 2>/dev/null || true
 systemctl disable win-sandbox-runner.service 2>/dev/null || true
 
 info "Unregistering binfmt handler..."
-if [[ -f /proc/sys/fs/binfmt_misc/Windows_PE ]]; then
-    echo -1 > /proc/sys/fs/binfmt_misc/Windows_PE
-fi
+# APEX-WIN is the current handler name. Windows_PE is the historical one and is
+# cleaned up too, so upgrading from an old install does not leave a stale
+# handler competing for the same MZ magic.
+for handler in APEX-WIN Windows_PE; do
+    if [[ -f "/proc/sys/fs/binfmt_misc/${handler}" ]]; then
+        echo -1 > "/proc/sys/fs/binfmt_misc/${handler}" 2>/dev/null \
+            && info "  unregistered ${handler}"
+    fi
+done
+# Remove the persistent definitions so they do not come back on reboot
+rm -f /etc/binfmt.d/apex-win.conf /etc/binfmt.d/windows-pe.conf
 
 info "Removing binaries..."
 rm -f "${BINDIR}/win-sandbox-runner"

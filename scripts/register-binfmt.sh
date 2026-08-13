@@ -46,7 +46,7 @@ fi
 #   mask = ffff (match both bytes)
 #   interpreter = /usr/bin/win-sandbox-runner
 #   flags = CF (C = credential inheritance, F = fix binary)
-echo ":${NAME}:M:0:\\x4d\\x5a:${BIN}:CF" > "$BINFMT_DIR/register"
+echo ":${NAME}:M:0:\\x4d\\x5a:\\xff\\xff:${BIN}:CF" > "$BINFMT_DIR/register"
 
 # Verify registration
 if [ -f "$BINFMT_DIR/$NAME" ]; then
