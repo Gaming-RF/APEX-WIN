@@ -16,7 +16,9 @@ rust-version = "1.75"
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-nix = { version = "0.29", features = ["process", "signal", "mount", "fs"] }
+# "user" provides Uid/Gid/chown, used by prefix.rs to hand ownership of the
+# Wine prefix to the invoking user when the daemon runs as root.
+nix = { version = "0.29", features = ["process", "signal", "mount", "fs", "user"] }
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
