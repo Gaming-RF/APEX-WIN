@@ -34,6 +34,17 @@ Without `apex-win.desktop` installed and registered, double-click does nothing
 useful, no matter how correct the daemon is. This was the actual reason
 double-click appeared broken.
 
+### Which path runs as whom (important)
+
+Path A (`apex-win.desktop` → `--exe`) runs **entirely as the invoking user**.
+Because `--exe` is set, `main()` never takes the FIFO branch, so the root daemon
+is not involved at all. Verified: prefixes under `~/.local/share/win-sandbox`
+are owned `user:user`. This is the safer path — arbitrary Windows binaries never
+execute as root.
+
+Path B (bare `./game.exe`) is the only one that reaches the root daemon, and it
+depends on env forwarded over the FIFO.
+
 **Path B — terminal / script execution**
 
 ```
@@ -216,10 +227,20 @@ Still open:
    `/etc/win-sandbox-runner/`, but a missing config dir silently degrades to an
    empty database.
 
-3. **Daemon FIFO path (Path B) not re-tested after the env fix** — the
-   double-click path (Path A) is verified. Path B routes through the root
-   daemon, which has no user environment and depends on FIFO env forwarding.
-   Needs the same `xwininfo` confirmation once the fixed binary is installed.
+3. **Daemon FIFO path (Path B) needs the fixed binary installed** — Path B was
+   re-tested and *reproduced* the original failure, because `/usr/bin/win-sandbox-runner`
+   is still the stale pre-fix build:
+
+   ```
+   WINEPREFIX: /tmp/.local/share/win-sandbox/prefixes/<hash>/prefix
+   wine: unable to create wineserver tmpdir
+   Launch failed: Wine exited with status: 1
+   ```
+
+   That is precisely the bug `PrefixManager::for_user` fixes. Wine and wineserver
+   were separately confirmed to work fine under the sanitized env, so no further
+   code change is expected — Path B just needs `make quick-install` to deploy the
+   current binary, then one `xwininfo` re-check.
 
 4. **Tier 2/3 not acceptance-tested** — only Tier 0 (trusted) and Tier 1 (Landlock)
    have been exercised against a real GUI app. Tier 2 (bubblewrap) and Tier 3
