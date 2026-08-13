@@ -242,9 +242,17 @@ Still open:
    code change is expected — Path B just needs `make quick-install` to deploy the
    current binary, then one `xwininfo` re-check.
 
-4. **Tier 2/3 not acceptance-tested** — only Tier 0 (trusted) and Tier 1 (Landlock)
-   have been exercised against a real GUI app. Tier 2 (bubblewrap) and Tier 3
-   (Xephyr/Xvfb) still need the same `xwininfo` confirmation.
+4. **Tier 3 has no ephemeral overlay on this host** — Tier 2 and Tier 3 are now
+   acceptance-tested. Tier 2 works: it starts Xephyr on `:1`, runs bwrap, and
+   `DISPLAY=:1 xwininfo` shows the app window while the user sees the Xephyr
+   window on `:0`.
+
+   Tier 3 cannot mount its OverlayFS as a normal user (`mount` needs root, and
+   bubblewrap only gained unprivileged `--overlay` in 0.10; Zorin 18.1 ships
+   0.9.0). It now degrades to Tier 2 with a warning instead of aborting, so apps
+   still launch, but **Tier 3 currently provides Tier 2 isolation, not
+   ephemeral-overlay isolation**. To get real Tier 3, either ship bubblewrap
+   >= 0.10 and switch to `--overlay`, or grant the mount via a setuid helper.
 
 5. **Wayland path untested** — verification was on X11 (`XDG_SESSION_TYPE=x11`).
    A Wayland session takes a different Wine driver path.
