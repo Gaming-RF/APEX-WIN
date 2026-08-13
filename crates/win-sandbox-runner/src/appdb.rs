@@ -81,7 +81,10 @@ impl AppDatabase {
         const EMBEDDED: &str = include_str!("../../../config/appdb.json");
         match serde_json::from_str::<Self>(EMBEDDED) {
             Ok(db) => {
-                info!("Loaded compiled-in app database: {} profiles", db.profiles.len());
+                info!(
+                    "Loaded compiled-in app database: {} profiles",
+                    db.profiles.len()
+                );
                 return db;
             }
             Err(e) => warn!("Failed to parse compiled-in appdb: {e}"),
@@ -170,33 +173,63 @@ pub fn auto_detect_tier(exe_path: &str) -> (Tier, &'static str) {
 
     // Installers/setup — untrusted, run in sandbox
     if name.contains("setup") || name.contains("install") || name.contains("update") {
-        return (Tier::Tier2, "Installer/setup detected — running in sandbox for safety");
+        return (
+            Tier::Tier2,
+            "Installer/setup detected — running in sandbox for safety",
+        );
     }
 
     // Known safe patterns
     let safe_patterns = [
-        "notepad", "calc", "mspaint", "winrar", "7z", "vlc", "foobar",
-        "putty", "filezilla", "irfanview",
+        "notepad",
+        "calc",
+        "mspaint",
+        "winrar",
+        "7z",
+        "vlc",
+        "foobar",
+        "putty",
+        "filezilla",
+        "irfanview",
     ];
     for pattern in &safe_patterns {
         if name.contains(pattern) {
-            return (Tier::Tier1, "Known safe application — running with light sandboxing");
+            return (
+                Tier::Tier1,
+                "Known safe application — running with light sandboxing",
+            );
         }
     }
 
     // Games — need network + GPU, use tier 2
     let game_patterns = [
-        "game", "launcher", "client", "steam", "epic", "gog", "origin",
-        "battle.net", "riot", "minecraft", "fortnite", "genshin",
+        "game",
+        "launcher",
+        "client",
+        "steam",
+        "epic",
+        "gog",
+        "origin",
+        "battle.net",
+        "riot",
+        "minecraft",
+        "fortnite",
+        "genshin",
     ];
     for pattern in &game_patterns {
         if name.contains(pattern) {
-            return (Tier::Tier2, "Game/launcher detected — running with network and GPU");
+            return (
+                Tier::Tier2,
+                "Game/launcher detected — running with network and GPU",
+            );
         }
     }
 
     // Unknown — tier 1 is a safe default (light sandbox, filesystem protection)
-    (Tier::Tier1, "Unknown application — running with light sandboxing")
+    (
+        Tier::Tier1,
+        "Unknown application — running with light sandboxing",
+    )
 }
 
 #[cfg(test)]
@@ -262,21 +295,19 @@ mod tests {
         let db = AppDatabase {
             version: 1,
             description: "test".into(),
-            profiles: vec![
-                AppProfile {
-                    name: "Fusion 360".into(),
-                    match_names: vec!["Fusion360.exe".into(), "FusionLauncher.exe".into()],
-                    tier: Tier::Tier0,
-                    trusted: true,
-                    network: true,
-                    gpu: true,
-                    dxvk: true,
-                    winetricks: vec!["dotnet48".into()],
-                    env: std::collections::HashMap::new(),
-                    wine_variant: "staging".into(),
-                    notes: "".into(),
-                },
-            ],
+            profiles: vec![AppProfile {
+                name: "Fusion 360".into(),
+                match_names: vec!["Fusion360.exe".into(), "FusionLauncher.exe".into()],
+                tier: Tier::Tier0,
+                trusted: true,
+                network: true,
+                gpu: true,
+                dxvk: true,
+                winetricks: vec!["dotnet48".into()],
+                env: std::collections::HashMap::new(),
+                wine_variant: "staging".into(),
+                notes: "".into(),
+            }],
         };
 
         // Case-insensitive match

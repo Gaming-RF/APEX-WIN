@@ -39,7 +39,10 @@ pub fn run_with_network(args: &Args, network: bool) -> Result<ExitCode> {
 
     // Mount OverlayFS
     let opts = mount_opts(&lower_dir, &dirs.upper, &dirs.work);
-    info!("Mounting OverlayFS: lower={lower_dir}, upper={}", dirs.upper);
+    info!(
+        "Mounting OverlayFS: lower={lower_dir}, upper={}",
+        dirs.upper
+    );
 
     let output = Command::new("mount")
         .args(["-t", "overlay", "overlay", "-o", &opts, &dirs.merged])
@@ -64,7 +67,11 @@ pub fn run_with_network(args: &Args, network: bool) -> Result<ExitCode> {
                 let _ = std::fs::remove_dir_all(&dirs.base);
                 return crate::tier2::run_with_network(args, network);
             }
-            bail!("OverlayFS mount failed with status: {} ({})", o.status, stderr.trim());
+            bail!(
+                "OverlayFS mount failed with status: {} ({})",
+                o.status,
+                stderr.trim()
+            );
         }
         Err(e) => {
             bail!("Failed to execute mount: {e} (try running with sudo or use --tier 2)");
@@ -268,7 +275,10 @@ mod tests {
     #[test]
     fn mount_opts_format() {
         let opts = mount_opts("/home/user/.wine", "/tmp/upper", "/tmp/work");
-        assert_eq!(opts, "lowerdir=/home/user/.wine,upperdir=/tmp/upper,workdir=/tmp/work");
+        assert_eq!(
+            opts,
+            "lowerdir=/home/user/.wine,upperdir=/tmp/upper,workdir=/tmp/work"
+        );
     }
 
     #[test]
@@ -280,10 +290,7 @@ mod tests {
 
     #[test]
     fn resolve_lower_with_missing_prefix() {
-        let result = resolve_lower_dir(
-            "/nonexistent/wine/prefix",
-            "/tmp/win-run-test-nonexistent",
-        );
+        let result = resolve_lower_dir("/nonexistent/wine/prefix", "/tmp/win-run-test-nonexistent");
         assert!(result.is_ok());
         assert!(result.unwrap().contains("lower"));
         let _ = std::fs::remove_dir_all("/tmp/win-run-test-nonexistent");

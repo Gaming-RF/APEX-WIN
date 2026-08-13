@@ -40,12 +40,12 @@ fn default_game_ports() -> Vec<u16> {
     vec![
         // Common game ports
         27015, 27016, 27017, 27018, 27019, 27020, // Steam / Source engine
-        3478, 3479, 3480,                           // PlayStation Network
-        3074,                                       // Xbox Live
-        6112, 6113, 6114, 6115, 6116,               // Blizzard / Warcraft
-        5060, 5061,                                 // SIP (general game VoIP)
-        1935,                                       // RTMP streaming
-        80, 443,                                    // HTTP/HTTPS (game APIs)
+        3478, 3479, 3480, // PlayStation Network
+        3074, // Xbox Live
+        6112, 6113, 6114, 6115, 6116, // Blizzard / Warcraft
+        5060, 5061, // SIP (general game VoIP)
+        1935, // RTMP streaming
+        80, 443, // HTTP/HTTPS (game APIs)
     ]
 }
 
@@ -78,11 +78,51 @@ pub struct OptimizeResult {
 impl std::fmt::Display for OptimizeResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Network Optimization Results:")?;
-        writeln!(f, "  BBR congestion:  {}", if self.bbr_applied { "✓ applied" } else { "— skipped" })?;
-        writeln!(f, "  SQM (fq_codel):  {}", if self.sqm_applied { "✓ applied" } else { "— skipped" })?;
-        writeln!(f, "  Socket buffers:  {}", if self.socket_buffers_applied { "✓ applied" } else { "— skipped" })?;
-        writeln!(f, "  DSCP marking:   {}", if self.dscp_applied { "✓ applied" } else { "— skipped" })?;
-        writeln!(f, "  TCP tweaks:     {}", if self.tcp_tweaks_applied { "✓ applied" } else { "— skipped" })?;
+        writeln!(
+            f,
+            "  BBR congestion:  {}",
+            if self.bbr_applied {
+                "✓ applied"
+            } else {
+                "— skipped"
+            }
+        )?;
+        writeln!(
+            f,
+            "  SQM (fq_codel):  {}",
+            if self.sqm_applied {
+                "✓ applied"
+            } else {
+                "— skipped"
+            }
+        )?;
+        writeln!(
+            f,
+            "  Socket buffers:  {}",
+            if self.socket_buffers_applied {
+                "✓ applied"
+            } else {
+                "— skipped"
+            }
+        )?;
+        writeln!(
+            f,
+            "  DSCP marking:   {}",
+            if self.dscp_applied {
+                "✓ applied"
+            } else {
+                "— skipped"
+            }
+        )?;
+        writeln!(
+            f,
+            "  TCP tweaks:     {}",
+            if self.tcp_tweaks_applied {
+                "✓ applied"
+            } else {
+                "— skipped"
+            }
+        )?;
         if !self.errors.is_empty() {
             writeln!(f, "  Errors:")?;
             for err in &self.errors {
@@ -159,7 +199,10 @@ pub fn optimize(config: &NetOptimizerConfig) -> Result<OptimizeResult> {
         match apply_dscp_rules(&config.game_ports) {
             Ok(()) => {
                 result.dscp_applied = true;
-                info!("  ✓ DSCP marking applied for {} ports", config.game_ports.len());
+                info!(
+                    "  ✓ DSCP marking applied for {} ports",
+                    config.game_ports.len()
+                );
             }
             Err(e) => {
                 result.errors.push(format!("DSCP: {e}"));
@@ -175,8 +218,8 @@ pub fn optimize(config: &NetOptimizerConfig) -> Result<OptimizeResult> {
 /// Enable BBR congestion control via sysctl.
 fn enable_bbr() -> Result<()> {
     // Check if BBR is available
-    let available = read_proc("/proc/sys/net/ipv4/tcp_available_congestion_control")
-        .unwrap_or_default();
+    let available =
+        read_proc("/proc/sys/net/ipv4/tcp_available_congestion_control").unwrap_or_default();
     if !available.contains("bbr") {
         return Err(anyhow::anyhow!(
             "BBR not available in kernel. Available: {available}"
@@ -259,8 +302,8 @@ fn apply_tcp_tweaks() -> Result<()> {
 /// Get the default network interface (the one with the default route).
 fn get_default_interface() -> Result<String> {
     // Read /proc/net/route to find the default interface
-    let routes = std::fs::read_to_string("/proc/net/route")
-        .context("Failed to read /proc/net/route")?;
+    let routes =
+        std::fs::read_to_string("/proc/net/route").context("Failed to read /proc/net/route")?;
 
     for line in routes.lines().skip(1) {
         let fields: Vec<&str> = line.split_whitespace().collect();
@@ -277,7 +320,9 @@ fn get_default_interface() -> Result<String> {
         }
     }
 
-    Err(anyhow::anyhow!("Could not detect default network interface"))
+    Err(anyhow::anyhow!(
+        "Could not detect default network interface"
+    ))
 }
 
 /// Apply SQM (Smart Queue Management) using tc + fq_codel.
@@ -287,7 +332,10 @@ fn apply_sqm(download_mbps: u32, upload_mbps: u32) -> Result<()> {
 
     // Calculate bandwidth limits (use 85% of detected speed if not specified)
     let _rates = if download_mbps > 0 && upload_mbps > 0 {
-        (format!("{}mbit", download_mbps), format!("{}mbit", upload_mbps))
+        (
+            format!("{}mbit", download_mbps),
+            format!("{}mbit", upload_mbps),
+        )
     } else {
         ("1gbit".to_string(), "1gbit".to_string())
     };
@@ -297,13 +345,12 @@ fn apply_sqm(download_mbps: u32, upload_mbps: u32) -> Result<()> {
 
     // Add root qdisc with fq_codel
     let result = run_tc(&[
-        "qdisc", "add", "dev", &iface, "root",
-        "handle", "1:", "fq_codel",
-        "limit", "10240",        // max packets in queue
-        "target", "5ms",         // target latency (5ms for gaming)
-        "interval", "100ms",     // interval for dropping
-        "quantum", "1514",       // bytes per round (1 MTU)
-        "ecn",                   // ECN marking instead of drops
+        "qdisc", "add", "dev", &iface, "root", "handle", "1:", "fq_codel", "limit",
+        "10240", // max packets in queue
+        "target", "5ms", // target latency (5ms for gaming)
+        "interval", "100ms", // interval for dropping
+        "quantum", "1514", // bytes per round (1 MTU)
+        "ecn",  // ECN marking instead of drops
     ]);
 
     match result {
@@ -315,10 +362,18 @@ fn apply_sqm(download_mbps: u32, upload_mbps: u32) -> Result<()> {
             // fq_codel may not be available, try fq as fallback
             warn!("  fq_codel failed, trying fq fallback: {e}");
             run_tc(&[
-                "qdisc", "add", "dev", &iface, "root",
-                "handle", "1:", "fq",
-                "quantum", "1514",
-                "initial_quantum", "1514",
+                "qdisc",
+                "add",
+                "dev",
+                &iface,
+                "root",
+                "handle",
+                "1:",
+                "fq",
+                "quantum",
+                "1514",
+                "initial_quantum",
+                "1514",
             ])
             .context("Failed to add fq qdisc")?;
             Ok(())
@@ -334,28 +389,46 @@ fn apply_dscp_rules(game_ports: &[u16]) -> Result<()> {
 
     for port in game_ports {
         // UDP game traffic - mark outbound
-        let result = run_cmd("iptables", &[
-            "-t", "mangle",
-            "-A", "OUTPUT",
-            "-p", "udp",
-            "--dport", &port.to_string(),
-            "-j", "DSCP",
-            "--set-dscp", dscp_value,
-        ]);
+        let result = run_cmd(
+            "iptables",
+            &[
+                "-t",
+                "mangle",
+                "-A",
+                "OUTPUT",
+                "-p",
+                "udp",
+                "--dport",
+                &port.to_string(),
+                "-j",
+                "DSCP",
+                "--set-dscp",
+                dscp_value,
+            ],
+        );
 
         if let Err(e) = result {
             debug!("  DSCP rule for UDP:{port} skipped: {e}");
         }
 
         // Also mark inbound game traffic (for local QoS)
-        let result = run_cmd("iptables", &[
-            "-t", "mangle",
-            "-A", "INPUT",
-            "-p", "udp",
-            "--sport", &port.to_string(),
-            "-j", "DSCP",
-            "--set-dscp", dscp_value,
-        ]);
+        let result = run_cmd(
+            "iptables",
+            &[
+                "-t",
+                "mangle",
+                "-A",
+                "INPUT",
+                "-p",
+                "udp",
+                "--sport",
+                &port.to_string(),
+                "-j",
+                "DSCP",
+                "--set-dscp",
+                dscp_value,
+            ],
+        );
 
         if let Err(e) = result {
             debug!("  DSCP rule for inbound UDP:{port} skipped: {e}");
@@ -370,16 +443,40 @@ pub fn cleanup_dscp_rules(game_ports: &[u16]) -> Result<()> {
     let dscp_value = "0x2e";
     for port in game_ports {
         // Delete (ignore errors if rule doesn't exist)
-        let _ = run_cmd("iptables", &[
-            "-t", "mangle", "-D", "OUTPUT",
-            "-p", "udp", "--dport", &port.to_string(),
-            "-j", "DSCP", "--set-dscp", dscp_value,
-        ]);
-        let _ = run_cmd("iptables", &[
-            "-t", "mangle", "-D", "INPUT",
-            "-p", "udp", "--sport", &port.to_string(),
-            "-j", "DSCP", "--set-dscp", dscp_value,
-        ]);
+        let _ = run_cmd(
+            "iptables",
+            &[
+                "-t",
+                "mangle",
+                "-D",
+                "OUTPUT",
+                "-p",
+                "udp",
+                "--dport",
+                &port.to_string(),
+                "-j",
+                "DSCP",
+                "--set-dscp",
+                dscp_value,
+            ],
+        );
+        let _ = run_cmd(
+            "iptables",
+            &[
+                "-t",
+                "mangle",
+                "-D",
+                "INPUT",
+                "-p",
+                "udp",
+                "--sport",
+                &port.to_string(),
+                "-j",
+                "DSCP",
+                "--set-dscp",
+                dscp_value,
+            ],
+        );
     }
     Ok(())
 }
@@ -415,8 +512,7 @@ fn read_proc(path: &str) -> Result<String> {
 }
 
 fn write_proc(path: &str, value: &str) -> Result<()> {
-    std::fs::write(path, value)
-        .with_context(|| format!("Failed to write {value} to {path}"))
+    std::fs::write(path, value).with_context(|| format!("Failed to write {value} to {path}"))
 }
 
 fn run_tc(args: &[&str]) -> Result<()> {
@@ -457,9 +553,12 @@ pub fn diagnose_and_configure() -> Result<()> {
     let bbr_available = read_proc("/proc/sys/net/ipv4/tcp_available_congestion_control")
         .map(|s| s.contains("bbr"))
         .unwrap_or(false);
-    let current_congestion = read_proc("/proc/sys/net/ipv4/tcp_congestion_control")
-        .unwrap_or_else(|_| "unknown".into());
-    println!("BBR available:   {}", if bbr_available { "yes" } else { "no" });
+    let current_congestion =
+        read_proc("/proc/sys/net/ipv4/tcp_congestion_control").unwrap_or_else(|_| "unknown".into());
+    println!(
+        "BBR available:   {}",
+        if bbr_available { "yes" } else { "no" }
+    );
     println!("Current CC:      {current_congestion}");
 
     // 2. Check current qdisc on default interface
@@ -597,8 +696,8 @@ mod tests {
         assert!(config.tcp_tweaks);
         assert!(!config.game_ports.is_empty());
         assert!(config.game_ports.contains(&27015)); // Steam
-        assert!(config.game_ports.contains(&3074));  // Xbox
-        assert!(config.game_ports.contains(&3478));  // PlayStation
+        assert!(config.game_ports.contains(&3074)); // Xbox
+        assert!(config.game_ports.contains(&3478)); // PlayStation
     }
 
     #[test]
@@ -631,11 +730,11 @@ mod tests {
         let ports = default_game_ports();
         // Verify all major gaming platforms are covered
         assert!(ports.contains(&27015)); // Steam/Source
-        assert!(ports.contains(&3074));  // Xbox Live
-        assert!(ports.contains(&3478));  // PSN
-        assert!(ports.contains(&6112));  // Blizzard
-        assert!(ports.contains(&80));    // HTTP
-        assert!(ports.contains(&443));   // HTTPS
+        assert!(ports.contains(&3074)); // Xbox Live
+        assert!(ports.contains(&3478)); // PSN
+        assert!(ports.contains(&6112)); // Blizzard
+        assert!(ports.contains(&80)); // HTTP
+        assert!(ports.contains(&443)); // HTTPS
     }
 
     #[test]

@@ -36,11 +36,7 @@ pub fn init_cleanup_pipe() -> Result<RawFd> {
 pub fn install_sigchld_handler() -> Result<()> {
     use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, Signal};
 
-    let _write_fd = unsafe {
-        CLEANUP_PIPE_FD
-            .expect("cleanup pipe not initialized")
-            .1
-    };
+    let _write_fd = unsafe { CLEANUP_PIPE_FD.expect("cleanup pipe not initialized").1 };
 
     extern "C" fn sigchld_handler(_sig: libc::c_int) {
         unsafe {
@@ -58,7 +54,9 @@ pub fn install_sigchld_handler() -> Result<()> {
         nix::sys::signal::SigSet::empty(),
     );
 
-    unsafe { sigaction(Signal::SIGCHLD, &action)?; }
+    unsafe {
+        sigaction(Signal::SIGCHLD, &action)?;
+    }
     info!("SIGCHLD handler installed");
     Ok(())
 }

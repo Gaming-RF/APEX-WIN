@@ -50,11 +50,7 @@ pub fn detect() -> Option<NvidiaInfo> {
 
 /// Detect Nvidia shared library paths in standard locations.
 fn detect_nvidia_libs() -> Vec<String> {
-    let lib_dirs = [
-        "/usr/lib/x86_64-linux-gnu",
-        "/usr/lib64",
-        "/usr/lib",
-    ];
+    let lib_dirs = ["/usr/lib/x86_64-linux-gnu", "/usr/lib64", "/usr/lib"];
 
     let mut libs = Vec::new();
     for dir in &lib_dirs {

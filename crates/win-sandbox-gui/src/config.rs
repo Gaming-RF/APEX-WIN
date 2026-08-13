@@ -27,20 +27,21 @@ impl Default for GuiConfig {
 
 /// Return the default socket path based on XDG_RUNTIME_DIR.
 pub fn default_socket_path() -> String {
-    let runtime = std::env::var("XDG_RUNTIME_DIR")
-        .unwrap_or_else(|_| "/tmp".to_string());
+    let runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
     format!("{runtime}/win-sandbox-runner.sock")
 }
 
 /// Load GUI configuration from the config file.
 /// Falls back to defaults if the file doesn't exist or can't be parsed.
 pub fn load_config(config_path: Option<&Path>) -> GuiConfig {
-    let path = config_path.unwrap_or_else(|| {
-        Path::new("/etc/win-sandbox-runner/win-sandbox-runner.conf")
-    });
+    let path =
+        config_path.unwrap_or_else(|| Path::new("/etc/win-sandbox-runner/win-sandbox-runner.conf"));
 
     if !path.exists() {
-        debug!("Config file not found at {}, using defaults", path.display());
+        debug!(
+            "Config file not found at {}, using defaults",
+            path.display()
+        );
         return GuiConfig::default();
     }
 
@@ -84,10 +85,7 @@ fn parse_gui_config(content: &str) -> GuiConfig {
 
 /// Parse a boolean value from config.
 fn parse_bool(s: &str) -> bool {
-    matches!(
-        s.to_lowercase().as_str(),
-        "true" | "yes" | "1" | "on"
-    )
+    matches!(s.to_lowercase().as_str(), "true" | "yes" | "1" | "on")
 }
 
 #[cfg(test)]
@@ -97,7 +95,10 @@ mod tests {
     #[test]
     fn default_config_sane() {
         let config = GuiConfig::default();
-        assert!(config.socket_path.to_string_lossy().contains("win-sandbox-runner.sock"));
+        assert!(config
+            .socket_path
+            .to_string_lossy()
+            .contains("win-sandbox-runner.sock"));
         assert!(config.remember_decisions);
     }
 

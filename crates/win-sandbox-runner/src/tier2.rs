@@ -240,8 +240,18 @@ fn bind_gamepad_devices(cmd: &mut Command) {
     }
 
     // Try to read /sys/class/input/*/device/name to identify gamepads
-    let gamepad_keywords = ["gamepad", "controller", "joystick", "xbox", "playstation",
-                            "dualshock", "dualsense", "switch", "pro controller", "joy-con"];
+    let gamepad_keywords = [
+        "gamepad",
+        "controller",
+        "joystick",
+        "xbox",
+        "playstation",
+        "dualshock",
+        "dualsense",
+        "switch",
+        "pro controller",
+        "joy-con",
+    ];
 
     let mut found_gamepads = false;
 
@@ -259,13 +269,18 @@ fn bind_gamepad_devices(cmd: &mut Command) {
             let device_name_path = entry.path().join("device").join("name");
             if let Ok(device_name) = std::fs::read_to_string(&device_name_path) {
                 let device_name_lower = device_name.trim().to_lowercase();
-                let is_gamepad = gamepad_keywords.iter().any(|kw| device_name_lower.contains(kw));
+                let is_gamepad = gamepad_keywords
+                    .iter()
+                    .any(|kw| device_name_lower.contains(kw));
 
                 if is_gamepad {
                     let event_path = format!("/dev/input/{name_str}");
                     if std::path::Path::new(&event_path).exists() {
                         cmd.args(["--dev-bind", &event_path, &event_path]);
-                        info!("Gamepad: bind-mounted {event_path} ({})", device_name.trim());
+                        info!(
+                            "Gamepad: bind-mounted {event_path} ({})",
+                            device_name.trim()
+                        );
                         found_gamepads = true;
                     }
                 }
@@ -299,7 +314,10 @@ fn apply_display_for_mode(
         }
         crate::display::DisplayMode::Wayland => {
             if let crate::display::DisplayServer::Wayland { display: wl }
-            | crate::display::DisplayServer::XWayland { wayland_display: wl, .. } = detected
+            | crate::display::DisplayServer::XWayland {
+                wayland_display: wl,
+                ..
+            } = detected
             {
                 cmd.env("WAYLAND_DISPLAY", wl);
                 cmd.env("WINE_WAYLAND_DRIVER", "1");

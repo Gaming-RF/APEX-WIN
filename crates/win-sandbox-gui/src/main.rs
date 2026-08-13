@@ -124,13 +124,21 @@ fn handle_ipc_request(request: ipc::IpcRequest) {
         win_sandbox_common::message::IpcMessage::Ping => {
             win_sandbox_common::message::IpcMessage::Pong
         }
-        win_sandbox_common::message::IpcMessage::SetupProgress { name, step, progress } => {
+        win_sandbox_common::message::IpcMessage::SetupProgress {
+            name,
+            step,
+            progress,
+        } => {
             info!("Setup progress: {name} — {step} ({progress:.0}%)");
             // In a full implementation, this would update a visible progress dialog.
             // For now, log it. The dialog module is ready at ui::setup_progress::show().
             return;
         }
-        win_sandbox_common::message::IpcMessage::SetupComplete { name, success, summary } => {
+        win_sandbox_common::message::IpcMessage::SetupComplete {
+            name,
+            success,
+            summary,
+        } => {
             info!("Setup complete: {name} — success={success} — {summary}");
             return;
         }

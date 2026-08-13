@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::tier::Tier;
+use serde::{Deserialize, Serialize};
 
 /// Top-level rules file structure.
 #[derive(Debug, Clone, Serialize, Deserialize)]

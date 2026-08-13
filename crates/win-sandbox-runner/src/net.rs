@@ -86,8 +86,7 @@ fn try_start_systemd_service() -> Result<bool> {
 /// Start the bridge daemon directly (forked to background).
 fn start_bridge_direct() -> Result<()> {
     // Look for the binary in standard locations
-    let bridge_bin = find_bridge_binary()
-        .context("win-tap-bridge binary not found")?;
+    let bridge_bin = find_bridge_binary().context("win-tap-bridge binary not found")?;
 
     info!("Starting {} directly", bridge_bin.display());
 
@@ -178,7 +177,10 @@ pub fn configure_bwrap_networking(
             cmd.args(["--ro-bind", resolv_conf, resolv_conf]);
             debug!("DNS: bind-mounted {}", resolv_conf);
         } else {
-            warn!("{} not found — DNS resolution will fail in sandbox", resolv_conf);
+            warn!(
+                "{} not found — DNS resolution will fail in sandbox",
+                resolv_conf
+            );
         }
 
         // Set WINEDLLPATH so Wine can find sys_netmp.dll

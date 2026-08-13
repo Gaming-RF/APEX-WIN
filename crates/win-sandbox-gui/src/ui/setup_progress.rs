@@ -36,21 +36,15 @@ pub fn show(app_name: &str) -> SetupProgressHandle {
     vbox.append(&header);
 
     // Status label
-    let label = gtk::Label::builder()
-        .label("Preparing...")
-        .build();
+    let label = gtk::Label::builder().label("Preparing...").build();
     vbox.append(&label);
 
     // Progress bar
-    let progress_bar = gtk::ProgressBar::builder()
-        .fraction(0.0)
-        .build();
+    let progress_bar = gtk::ProgressBar::builder().fraction(0.0).build();
     vbox.append(&progress_bar);
 
     // Spinner for indeterminate state
-    let spinner = gtk::Spinner::builder()
-        .spinning(true)
-        .build();
+    let spinner = gtk::Spinner::builder().spinning(true).build();
     vbox.append(&spinner);
 
     window.set_child(Some(&vbox));

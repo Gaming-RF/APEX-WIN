@@ -84,7 +84,10 @@ pub fn execute(
             info!("Trusted app '{}', no sandboxing", entry.name);
 
             if args.dry_run {
-                info!("[DRY RUN] Would run trusted '{}' with wine directly", entry.name);
+                info!(
+                    "[DRY RUN] Would run trusted '{}' with wine directly",
+                    entry.name
+                );
                 return Ok(ExitCode::SUCCESS);
             }
 
@@ -114,9 +117,7 @@ pub fn execute(
     info!("Network access: {network}");
 
     if args.dry_run {
-        info!(
-            "[DRY RUN] Would execute tier {tier} for {exe} (network={network})",
-        );
+        info!("[DRY RUN] Would execute tier {tier} for {exe} (network={network})",);
         return Ok(ExitCode::SUCCESS);
     }
 

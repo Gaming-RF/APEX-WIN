@@ -94,7 +94,10 @@ fn validate_rules(rules: &RulesFile) -> Result<()> {
 }
 
 /// Look up a rule entry by binary hash.
-pub fn lookup_by_hash<'a>(rules: &'a RulesFile, hash: &str) -> Option<&'a win_sandbox_common::rules_schema::RuleEntry> {
+pub fn lookup_by_hash<'a>(
+    rules: &'a RulesFile,
+    hash: &str,
+) -> Option<&'a win_sandbox_common::rules_schema::RuleEntry> {
     rules.entries.iter().find(|e| e.hash == hash)
 }
 

@@ -53,7 +53,11 @@ pub fn show(binary_name: &str, hash: &str, path: &str) -> ConfirmResult {
         "<b>Name:</b> {}\n<b>Hash:</b> {}…{}\n<b>Path:</b> {}",
         glib::markup_escape_text(binary_name),
         &hash[..8.min(hash.len())],
-        if hash.len() > 8 { &hash[hash.len()-8..] } else { "" },
+        if hash.len() > 8 {
+            &hash[hash.len() - 8..]
+        } else {
+            ""
+        },
         glib::markup_escape_text(path),
     );
     let info_label = gtk::Label::new(None);

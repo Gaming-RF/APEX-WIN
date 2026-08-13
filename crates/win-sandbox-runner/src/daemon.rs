@@ -96,10 +96,7 @@ fn ensure_runtime_dir() -> Result<()> {
         std::fs::create_dir_all(dir)
             .context("Failed to create /run/win-sandbox-runner (are you root?)")?;
         // Allow any user to write to the FIFO (for binfmt_misc)
-        std::fs::set_permissions(
-            dir,
-            std::os::unix::fs::PermissionsExt::from_mode(0o1777),
-        )?;
+        std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o1777))?;
     }
     Ok(())
 }
@@ -195,10 +192,7 @@ fn create_fifo() -> Result<()> {
     }
 
     // Set permissions to world-writable (any user launching .exe needs to write)
-    std::fs::set_permissions(
-        &path,
-        std::os::unix::fs::PermissionsExt::from_mode(0o666),
-    )?;
+    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o666))?;
 
     debug!("FIFO created at {}", path.display());
     Ok(())
@@ -220,14 +214,10 @@ fn spawn_ipc_listener(
         std::fs::remove_file(&path)?;
     }
 
-    let listener = UnixListener::bind(&path)
-        .context("Failed to create IPC socket")?;
+    let listener = UnixListener::bind(&path).context("Failed to create IPC socket")?;
 
     // Allow any user to connect
-    std::fs::set_permissions(
-        &path,
-        std::os::unix::fs::PermissionsExt::from_mode(0o666),
-    )?;
+    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o666))?;
 
     info!("IPC socket listening at {}", path.display());
 
@@ -332,11 +322,17 @@ pub unsafe fn configure_child_uid(cmd: &mut std::process::Command, uid: u32) {
             if !passwd.is_null() {
                 let gid = (*passwd).pw_gid;
                 if libc::setgid(gid) != 0 {
-                    tracing::warn!("Failed to setgid({gid}): {}", std::io::Error::last_os_error());
+                    tracing::warn!(
+                        "Failed to setgid({gid}): {}",
+                        std::io::Error::last_os_error()
+                    );
                 }
             }
             if libc::setuid(uid) != 0 {
-                tracing::warn!("Failed to setuid({uid}): {}", std::io::Error::last_os_error());
+                tracing::warn!(
+                    "Failed to setuid({uid}): {}",
+                    std::io::Error::last_os_error()
+                );
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())
@@ -398,7 +394,10 @@ pub fn run_daemon() -> Result<()> {
         }
     }
 
-    info!("APEX-WIN daemon ready. Listening on {}", fifo_path().display());
+    info!(
+        "APEX-WIN daemon ready. Listening on {}",
+        fifo_path().display()
+    );
 
     // 7. Main loop: read exe paths from FIFO, dispatch each one
     loop {
@@ -542,7 +541,10 @@ fn handle_launch(req: &LaunchRequest, state: &Arc<Mutex<DaemonState>>) -> Result
     {
         let mut state = state.lock().unwrap();
         state.launch_count += 1;
-        *state.launch_history.entry(req.exe_path.clone()).or_insert(0) += 1;
+        *state
+            .launch_history
+            .entry(req.exe_path.clone())
+            .or_insert(0) += 1;
     }
 
     // Note: user env vars are passed via Args.user_env — no global set_var.
@@ -596,8 +598,8 @@ pub fn query_status() -> Result<String> {
         ));
     }
 
-    let mut stream = UnixStream::connect(&path)
-        .context("Failed to connect to daemon IPC socket")?;
+    let mut stream =
+        UnixStream::connect(&path).context("Failed to connect to daemon IPC socket")?;
 
     stream.write_all(b"status\n")?;
     stream.flush()?;
@@ -619,8 +621,8 @@ pub fn send_command(cmd: &str) -> Result<String> {
         ));
     }
 
-    let mut stream = UnixStream::connect(&path)
-        .context("Failed to connect to daemon IPC socket")?;
+    let mut stream =
+        UnixStream::connect(&path).context("Failed to connect to daemon IPC socket")?;
 
     stream.write_all(format!("{cmd}\n").as_bytes())?;
     stream.flush()?;

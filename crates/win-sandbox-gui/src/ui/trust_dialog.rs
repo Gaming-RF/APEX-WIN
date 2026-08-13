@@ -54,7 +54,11 @@ pub fn show(binary_name: &str, hash: &str, path: &str, suggested_tier: u8) -> Tr
         "<b>Name:</b> {}\n<b>Hash:</b> {}…{}\n<b>Path:</b> {}",
         glib::markup_escape_text(binary_name),
         &hash[..8.min(hash.len())],
-        if hash.len() > 8 { &hash[hash.len()-8..] } else { "" },
+        if hash.len() > 8 {
+            &hash[hash.len() - 8..]
+        } else {
+            ""
+        },
         glib::markup_escape_text(path),
     );
     let info_label = gtk::Label::new(None);
@@ -67,8 +71,14 @@ pub fn show(binary_name: &str, hash: &str, path: &str, suggested_tier: u8) -> Tr
     let tier_descriptions = [
         ("Tier 0 — None", "Direct wine exec, no isolation"),
         ("Tier 1 — Landlock", "Filesystem restrictions via LSM"),
-        ("Tier 2 — Bubblewrap", "Namespace container with GPU/audio passthrough"),
-        ("Tier 3 — Overlay", "Ephemeral RAM overlay, changes lost on exit"),
+        (
+            "Tier 2 — Bubblewrap",
+            "Namespace container with GPU/audio passthrough",
+        ),
+        (
+            "Tier 3 — Overlay",
+            "Ephemeral RAM overlay, changes lost on exit",
+        ),
     ];
 
     // Tier selection — radio buttons
@@ -87,9 +97,7 @@ pub fn show(binary_name: &str, hash: &str, path: &str, suggested_tier: u8) -> Tr
             .build();
 
         let radio = if let Some(ref first) = first_radio {
-            gtk::CheckButton::builder()
-                .group(first)
-                .build()
+            gtk::CheckButton::builder().group(first).build()
         } else {
             let r = gtk::CheckButton::new();
             first_radio = Some(r.clone());
@@ -145,9 +153,7 @@ pub fn show(binary_name: &str, hash: &str, path: &str, suggested_tier: u8) -> Tr
         .build();
 
     // Cancel button
-    let cancel_btn = gtk::Button::builder()
-        .label("Cancel")
-        .build();
+    let cancel_btn = gtk::Button::builder().label("Cancel").build();
     {
         let result_ref = result.clone();
         let dialog_ref = dialog.clone();

@@ -93,8 +93,8 @@ fn handle_connection(stream: UnixStream, tx: &mpsc::Sender<IpcRequest>) -> Resul
         bail!("empty request");
     }
 
-    let request: IpcMessage = serde_json::from_str(line)
-        .with_context(|| format!("Invalid IPC JSON: {line}"))?;
+    let request: IpcMessage =
+        serde_json::from_str(line).with_context(|| format!("Invalid IPC JSON: {line}"))?;
 
     debug!("IPC received: {request:?}");
 
@@ -149,8 +149,8 @@ pub fn send_request(socket_path: &str, msg: &IpcMessage) -> Result<IpcMessage> {
     reader.read_line(&mut line)?;
     let line = line.trim();
 
-    let response: IpcMessage = serde_json::from_str(line)
-        .with_context(|| format!("Invalid IPC response: {line}"))?;
+    let response: IpcMessage =
+        serde_json::from_str(line).with_context(|| format!("Invalid IPC response: {line}"))?;
 
     Ok(response)
 }
@@ -220,7 +220,11 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: IpcMessage = serde_json::from_str(&json).unwrap();
         match parsed {
-            IpcMessage::TrustRequest { hash, suggested_tier, .. } => {
+            IpcMessage::TrustRequest {
+                hash,
+                suggested_tier,
+                ..
+            } => {
                 assert_eq!(hash, "def456");
                 assert_eq!(suggested_tier, 2);
             }

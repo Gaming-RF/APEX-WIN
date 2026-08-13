@@ -239,7 +239,10 @@ tap_device = test-tap0
         let mut config = Config::default();
         parse_ini_config(ini, &mut config);
         assert_eq!(config.wine_prefix, "/home/test/.wine-test");
-        assert_eq!(config.rules_path.unwrap().to_str().unwrap(), "/etc/test/rules.json");
+        assert_eq!(
+            config.rules_path.unwrap().to_str().unwrap(),
+            "/etc/test/rules.json"
+        );
         assert!(!config.gui_enabled);
         assert_eq!(config.default_tier, 2);
         assert_eq!(config.display_mode, DisplayMode::Wayland);

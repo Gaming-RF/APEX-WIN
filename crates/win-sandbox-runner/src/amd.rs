@@ -40,7 +40,10 @@ pub fn detect() -> Option<AmdInfo> {
         return None;
     }
 
-    info!("AMD/Intel GPU detected: {} render nodes", render_nodes.len());
+    info!(
+        "AMD/Intel GPU detected: {} render nodes",
+        render_nodes.len()
+    );
 
     Some(AmdInfo {
         render_nodes,

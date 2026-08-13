@@ -3,6 +3,7 @@ mod appdb;
 mod audio;
 mod cleanup;
 mod config;
+mod daemon;
 mod dispatch;
 mod display;
 mod env_sanitize;
@@ -16,7 +17,6 @@ mod tier0;
 mod tier1;
 mod tier2;
 mod tier3;
-mod daemon;
 mod wizard;
 
 use anyhow::Result;
@@ -166,9 +166,14 @@ fn main() -> ExitCode {
                     let _ = writeln!(f, "UID:{}", unsafe { libc::getuid() });
                     // Pass display-critical environment variables
                     let display_vars = [
-                        "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR",
-                        "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS",
-                        "XDG_SESSION_TYPE", "HOME", "USER",
+                        "DISPLAY",
+                        "WAYLAND_DISPLAY",
+                        "XDG_RUNTIME_DIR",
+                        "XAUTHORITY",
+                        "DBUS_SESSION_BUS_ADDRESS",
+                        "XDG_SESSION_TYPE",
+                        "HOME",
+                        "USER",
                     ];
                     for var in &display_vars {
                         if let Ok(val) = std::env::var(var) {
@@ -333,7 +338,9 @@ fn check_wine_version() -> Result<()> {
 
     // Parse "wine-X.Y.Z" or "wine-X.Y"
     if let Some(ver) = version_str.strip_prefix("wine-") {
-        let major: u32 = ver.split('.').next()
+        let major: u32 = ver
+            .split('.')
+            .next()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
         if major < 9 {
@@ -356,11 +363,10 @@ fn save_trusted_rule(exe_path: &str, hash: &str) -> Result<()> {
         .unwrap_or("unknown")
         .to_string();
 
-    let rules_path = config::find_rules_path(None)
-        .unwrap_or_else(|| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-            std::path::PathBuf::from(format!("{home}/.config/win-sandbox/rules.json"))
-        });
+    let rules_path = config::find_rules_path(None).unwrap_or_else(|| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+        std::path::PathBuf::from(format!("{home}/.config/win-sandbox/rules.json"))
+    });
 
     // Load existing rules or create defaults
     let mut rules = rules::load_rules(Some(&rules_path)).unwrap_or(RulesFile {

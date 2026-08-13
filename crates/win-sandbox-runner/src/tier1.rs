@@ -1,8 +1,8 @@
 use crate::Args;
 use anyhow::{bail, Result};
 use landlock::{
-    path_beneath_rules, Access, AccessFs, CompatLevel, Compatible, LandlockStatus,
-    Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetStatus, ABI,
+    path_beneath_rules, Access, AccessFs, CompatLevel, Compatible, LandlockStatus, Ruleset,
+    RulesetAttr, RulesetCreatedAttr, RulesetStatus, ABI,
 };
 use std::os::unix::process::CommandExt;
 use std::path::Path;
