@@ -16,15 +16,13 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use tracing::{debug, error, info, warn};
 
-use crate::{appdb, config, dispatch, hasher, netopt, prefix, rules, Args};
+use crate::{appdb, config, dispatch, hasher, netopt, rules, Args};
 use win_sandbox_common::rules_schema::RulesFile;
 
 /// Runtime state cached by the daemon to avoid re-loading on every .exe launch.
 pub struct DaemonState {
     pub app_db: appdb::AppDatabase,
     pub rules: RulesFile,
-    #[allow(dead_code)]
-    pub prefix_mgr: prefix::PrefixManager,
     #[allow(dead_code)]
     pub config: crate::config::Config,
     pub net_config: netopt::NetOptimizerConfig,
@@ -40,7 +38,9 @@ impl DaemonState {
         let app_db = appdb::AppDatabase::load_embedded();
         let rules_path = config::find_rules_path(None);
         let rules = rules::load_rules(rules_path.as_deref())?;
-        let prefix_mgr = prefix::PrefixManager::new();
+        // No PrefixManager here on purpose: it must be built per-launch from the
+        // FIFO-forwarded user env (PrefixManager::for_user), because the daemon
+        // runs as root and its own HOME is /root or unset.
         let config = crate::config::load_config(None);
         let net_config = netopt::load_config(None);
 
@@ -53,7 +53,6 @@ impl DaemonState {
         Ok(Self {
             app_db,
             rules,
-            prefix_mgr,
             config,
             net_config,
             launch_count: 0,

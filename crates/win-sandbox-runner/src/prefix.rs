@@ -27,14 +27,15 @@ pub struct PrefixManager {
 }
 
 impl PrefixManager {
-    /// Create a new prefix manager rooted at the default location.
+    /// Create a prefix manager rooted from the **current process** environment.
     ///
-    /// Resolves from the *current process* environment. Correct for direct
-    /// CLI use, but NOT for the daemon: it runs as root under systemd, where
-    /// HOME is `/root` (permission denied) or unset (falls back to `/tmp`,
-    /// which Wine refuses with "not owned by you"). Daemon paths must use
-    /// [`PrefixManager::for_user`] instead.
-    pub fn new() -> Self {
+    /// Only correct for direct CLI use, where the process already belongs to the
+    /// invoking user. The daemon must NOT use this: it runs as root under
+    /// systemd, where HOME is `/root` (EACCES) or unset (falls back to `/tmp`,
+    /// which Wine refuses with "not owned by you"). Named explicitly so the
+    /// wrong choice is visible at the call site rather than hidden behind
+    /// `new()`. Daemon paths use [`PrefixManager::for_user`].
+    pub fn for_current_process() -> Self {
         let base_dir = dirs_or_fallback("XDG_DATA_HOME", ".local/share/win-sandbox/prefixes");
         Self { base_dir }
     }
@@ -42,8 +43,9 @@ impl PrefixManager {
     /// Create a prefix manager rooted at the *invoking user's* home.
     ///
     /// `user_env` is the environment forwarded over the daemon FIFO. Uses
-    /// XDG_DATA_HOME if present, else HOME. Falls back to [`Self::new`] when
-    /// neither is available, preserving direct-CLI behaviour.
+    /// XDG_DATA_HOME if present, else HOME. Falls back to
+    /// [`Self::for_current_process`] when neither is available, preserving
+    /// direct-CLI behaviour.
     pub fn for_user(user_env: &std::collections::HashMap<String, String>) -> Self {
         if let Some(xdg) = user_env.get("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
             return Self {
@@ -55,7 +57,7 @@ impl PrefixManager {
                 base_dir: PathBuf::from(home).join(".local/share/win-sandbox/prefixes"),
             };
         }
-        Self::new()
+        Self::for_current_process()
     }
 
     /// Create a prefix manager with a custom base directory (for testing).
@@ -328,7 +330,7 @@ impl PrefixManager {
 
 impl Default for PrefixManager {
     fn default() -> Self {
-        Self::new()
+        Self::for_current_process()
     }
 }
 
@@ -443,7 +445,7 @@ mod tests {
         let env = std::collections::HashMap::new();
         assert_eq!(
             PrefixManager::for_user(&env).wine_prefix("x"),
-            PrefixManager::new().wine_prefix("x")
+            PrefixManager::for_current_process().wine_prefix("x")
         );
     }
 
