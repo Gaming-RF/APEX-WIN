@@ -5,6 +5,7 @@ use landlock::{
     Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetStatus, ABI,
 };
 use std::os::unix::process::CommandExt;
+use std::path::Path;
 use std::process::{Command, ExitCode};
 use tracing::{info, warn};
 
@@ -24,9 +25,14 @@ pub fn run(args: &Args) -> Result<ExitCode> {
     let config = crate::config::load_config(None);
     let abi = detect_landlock_abi()?;
 
+    // The prefix dispatch::execute resolved for this app. config.wine_prefix is
+    // only the generic default and would grant the wrong directory.
+    let resolved_prefix =
+        std::env::var("WINEPREFIX").unwrap_or_else(|_| config.wine_prefix.clone());
+
     // Build read-only paths: system dirs + wine prefix
-    let ro_paths = build_ro_paths(&config.wine_prefix, args);
-    let rw_paths = build_rw_paths();
+    let ro_paths = build_ro_paths(&resolved_prefix, args);
+    let rw_paths = build_rw_paths(&resolved_prefix, &args.user_env);
 
     // Create ruleset with filesystem access handling.
     // Landlock cannot deny all TCP — it only grants specific ports. So we only
@@ -132,7 +138,22 @@ fn build_ro_paths(wine_prefix: &str, args: &Args) -> Vec<String> {
 }
 
 /// Build the list of read-write filesystem paths.
-fn build_rw_paths() -> Vec<String> {
+/// Build the read-write allowlist for the Landlock sandbox.
+///
+/// `wine_prefix` must be the *resolved* per-app prefix and `user_env` the
+/// environment forwarded over the daemon FIFO.
+///
+/// Both matter because the daemon runs as a systemd service with a near-empty
+/// environment. Reading XDG_RUNTIME_DIR from `std::env` here returns nothing,
+/// so /run/user/<uid> was silently omitted from the allowlist and Landlock
+/// denied wineserver its socket directory:
+///     wine: unable to create wineserver tmpdir
+/// The prefix itself was never granted either, so Wine could not write its own
+/// registry or drive_c.
+fn build_rw_paths(
+    wine_prefix: &str,
+    user_env: &std::collections::HashMap<String, String>,
+) -> Vec<String> {
     let pid = std::process::id();
     let tmp_dir = format!("/tmp/win-runtime-{pid}");
     let _ = std::fs::create_dir_all(&tmp_dir);
@@ -144,8 +165,23 @@ fn build_rw_paths() -> Vec<String> {
         tmp_dir,
     ];
 
-    if let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") {
-        paths.push(runtime);
+    // Wine must write its prefix (registry, drive_c, wineserver lock).
+    if !wine_prefix.is_empty() && Path::new(wine_prefix).exists() {
+        paths.push(wine_prefix.to_string());
+    }
+
+    // Prefer the forwarded user value; fall back to the process env for
+    // direct CLI use, where the daemon is not involved.
+    let runtime_dir = user_env
+        .get("XDG_RUNTIME_DIR")
+        .filter(|v| !v.is_empty())
+        .cloned()
+        .or_else(|| std::env::var("XDG_RUNTIME_DIR").ok());
+
+    if let Some(runtime) = runtime_dir {
+        if Path::new(&runtime).exists() {
+            paths.push(runtime);
+        }
     }
 
     paths
@@ -223,7 +259,54 @@ mod tests {
 
     #[test]
     fn rw_paths_include_tmp() {
-        let paths = build_rw_paths();
+        let env = std::collections::HashMap::new();
+        let paths = build_rw_paths("", &env);
         assert!(paths.iter().any(|p| p.starts_with("/tmp/win-runtime-")));
+    }
+
+    /// The daemon runs as a systemd service with a near-empty environment, so
+    /// XDG_RUNTIME_DIR must come from the FIFO-forwarded user env. Without it,
+    /// /run/user/<uid> is missing from the allowlist and Landlock denies
+    /// wineserver its socket dir ("unable to create wineserver tmpdir").
+    #[test]
+    fn rw_paths_use_forwarded_runtime_dir() {
+        let mut env = std::collections::HashMap::new();
+        // Use a path that exists on any Linux host so the check is real.
+        env.insert("XDG_RUNTIME_DIR".to_string(), "/tmp".to_string());
+
+        let paths = build_rw_paths("", &env);
+        assert!(
+            paths.contains(&"/tmp".to_string()),
+            "forwarded XDG_RUNTIME_DIR must be granted RW, got {paths:?}"
+        );
+    }
+
+    /// Wine writes its registry, drive_c and wineserver lock inside the prefix,
+    /// so the resolved per-app prefix must be writable, not just readable.
+    #[test]
+    fn rw_paths_include_wine_prefix() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let prefix = tmp.path().to_str().unwrap();
+        let env = std::collections::HashMap::new();
+
+        let paths = build_rw_paths(prefix, &env);
+        assert!(
+            paths.contains(&prefix.to_string()),
+            "wine prefix must be RW, got {paths:?}"
+        );
+    }
+
+    /// Non-existent paths must not be added: Landlock rejects rules for paths
+    /// it cannot open, which would fail the whole ruleset.
+    #[test]
+    fn rw_paths_skip_missing_dirs() {
+        let mut env = std::collections::HashMap::new();
+        env.insert(
+            "XDG_RUNTIME_DIR".to_string(),
+            "/nonexistent-runtime-xyz".to_string(),
+        );
+
+        let paths = build_rw_paths("/nonexistent-prefix-xyz", &env);
+        assert!(!paths.iter().any(|p| p.contains("nonexistent")));
     }
 }
