@@ -224,20 +224,29 @@ Resolved since the first draft of this document:
 
 Still open:
 
-1. **Daemon FIFO path (Path B) needs the fixed binary installed** — Path B was
-   re-tested and *reproduced* the original failure, because `/usr/bin/win-sandbox-runner`
-   is still the stale pre-fix build:
+1. ~~Daemon FIFO path (Path B) broken~~ — **fixed and verified.** Both launch
+   paths now map a real window.
 
-   ```
-   WINEPREFIX: /tmp/.local/share/win-sandbox/prefixes/<hash>/prefix
-   wine: unable to create wineserver tmpdir
-   Launch failed: Wine exited with status: 1
-   ```
+   Worth reading if you hit something similar. The failure was
+   `wine: unable to create wineserver tmpdir`, and it survived two wrong
+   diagnoses before the real cause was found:
 
-   That is precisely the bug `PrefixManager::for_user` fixes. Wine and wineserver
-   were separately confirmed to work fine under the sanitized env, so no further
-   code change is expected — Path B just needs `make quick-install` to deploy the
-   current binary, then one `xwininfo` re-check.
+   - *Wrong #1:* the `/tmp` prefix. Real bug, fixed by `PrefixManager::for_user`,
+     but the wineserver error persisted afterwards.
+   - *Wrong #2:* `ProtectHome=read-only` in the unit. A `systemd-run` probe
+     proved `/home` really was read-only, which looked conclusive. Removing it
+     changed nothing.
+   - *Actual cause:* `tier1::build_rw_paths()` read `XDG_RUNTIME_DIR` from
+     `std::env`. The daemon is a systemd service with a near-empty environment
+     (verify with `cat /proc/<pid>/environ`), so the value was absent,
+     `/run/user/<uid>` was silently dropped from the Landlock allowlist, and
+     wineserver was denied its socket dir. The prefix was also only granted
+     read, never write.
+
+   The lesson worth keeping: a plausible mechanism that reproduces in isolation
+   is not proof of causation. Both wrong theories were independently true and
+   neither was the bug. What settled it was reading the daemon's actual
+   environment instead of reasoning about what it should contain.
 
 2. **Tier 3 has no ephemeral overlay on this host** — Tier 2 and Tier 3 are now
    acceptance-tested. Tier 2 works: it starts Xephyr on `:1`, runs bwrap, and
