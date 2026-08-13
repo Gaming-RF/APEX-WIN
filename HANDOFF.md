@@ -162,12 +162,21 @@ journalctl -u win-sandbox-runner -f
 
 ---
 
-## Tests
+## Tests / CI
 
 ```bash
-cargo test --workspace          # 78 tests
-cargo clippy --workspace -- -D warnings  # Clean
+cargo test --workspace                          # 95 tests
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all --check
 ```
+
+CI runs all three on every push (`.github/workflows/ci.yml`), plus a
+skip-safe integration job. Adding it immediately caught that the workspace
+did not actually build: `nix` was missing the `user` feature, and stale
+release artifacts had been masking it.
+
+Note `--all-targets` on clippy: several real bugs here were only visible in
+test code.
 
 ---
 
