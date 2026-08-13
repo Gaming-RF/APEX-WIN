@@ -125,6 +125,22 @@ quick-install: cargo-release
 	@sudo install -Dm755 target/release/win-sandbox-gui $(BINDIR)/win-sandbox-gui
 	@sudo install -Dm644 scripts/register-binfmt.sh $(BINDIR)/register-binfmt.sh
 	@sudo install -Dm644 scripts/win-sandbox-runner.service /etc/systemd/system/win-sandbox-runner.service
+	@# Desktop MIME handler — makes double-click work in the file manager.
+	@# Without this, GNOME/Nautilus resolves a MIME handler and never exec()s
+	@# the file, so binfmt_misc alone is NOT enough for double-click.
+	@sudo install -Dm644 scripts/apex-win.desktop /usr/share/applications/apex-win.desktop
+	@sudo update-desktop-database /usr/share/applications 2>/dev/null || true
+	@# Register as default for every MIME type a PE binary may be detected as.
+	@# Run as the invoking user: xdg-mime writes per-user prefs, so running it
+	@# under sudo would set root's associations and leave the desktop unchanged.
+	@for m in application/vnd.microsoft.portable-executable application/x-ms-dos-executable application/x-msdownload application/x-msi; do \
+		if [ -n "$$SUDO_USER" ]; then \
+			sudo -u "$$SUDO_USER" xdg-mime default apex-win.desktop $$m 2>/dev/null || true; \
+		else \
+			xdg-mime default apex-win.desktop $$m 2>/dev/null || true; \
+		fi; \
+	done
+	@echo "✓ Double-click handler registered for .exe files"
 	@# Install config files
 	@sudo mkdir -p /etc/win-sandbox-runner
 	@sudo install -m 644 config/appdb.json /etc/win-sandbox-runner/appdb.json
