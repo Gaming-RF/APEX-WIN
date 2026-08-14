@@ -1,5 +1,5 @@
 use crate::Args;
-use anyhow::Result;
+use anyhow::{bail, Result};
 use std::process::ExitCode;
 use tracing::{info, warn};
 use win_sandbox_common::rules_schema::RulesFile;
@@ -22,6 +22,70 @@ fn resolve_network_permission(rules: &RulesFile, hash: &str) -> bool {
     }
 }
 
+/// Resolve which tier to run at, and whether that came from an explicit,
+/// user-authored source rather than a heuristic default.
+///
+/// Explicit sources: the `--tier` CLI flag, or a hash the user (or `--trust`)
+/// put in `rules.json` themselves. Heuristic sources: an app-database match
+/// (APEX-WIN's own profile for a known app), the wizard's auto-detect
+/// heuristics, the untrusted-path fallback, or the unmapped-binary fallback.
+/// Only the explicit path is a promise the user actually made, which is what
+/// the fail-secure Tier 3 check in `execute()` depends on.
+///
+/// Extracted from `execute()` so this resolution logic — the part most worth
+/// getting right — is testable without standing up a Wine prefix.
+fn resolve_tier(
+    args: &Args,
+    exe: &str,
+    rules: &RulesFile,
+    explicit_entry: &Option<win_sandbox_common::rules_schema::RuleEntry>,
+    matched_entry: &Option<win_sandbox_common::rules_schema::RuleEntry>,
+) -> Result<(Tier, bool)> {
+    if let Some(ref tier_str) = args.tier {
+        let t: Tier = tier_str.parse()?;
+        info!("Forced tier: {t}");
+        return Ok((t, true));
+    }
+    if let Some(ref entry) = explicit_entry {
+        info!("Matched rule '{}', tier: {}", entry.name, entry.tier);
+        return Ok((entry.tier, true));
+    }
+    if let Some(ref entry) = matched_entry {
+        info!(
+            "Matched app-database/heuristic entry '{}', tier: {}",
+            entry.name, entry.tier
+        );
+        return Ok((entry.tier, false));
+    }
+    if is_untrusted_path(exe) {
+        let t = rules.defaults.untrusted_path_tier;
+        warn!("Untrusted path '{}', using tier {t}", exe);
+        return Ok((t, false));
+    }
+    let t = rules.defaults.unmapped_tier;
+    info!("No rule matched, using default tier {t}");
+    Ok((t, false))
+}
+
+/// Check whether an explicit Tier 3 request can be honored as real
+/// ephemeral-overlay isolation. `Err` carries the human-readable reason it
+/// cannot, for both the refusal message and the `--dry-run` report.
+fn check_tier3_available(
+    tier3_available: bool,
+    bwrap_version: &Option<String>,
+) -> Result<(), String> {
+    if tier3_available {
+        return Ok(());
+    }
+    Err(match bwrap_version {
+        Some(v) => format!(
+            "bubblewrap {v} does not support unprivileged overlay mounts \
+             (needs >= 0.10.0), and OverlayFS via mount(8) requires root"
+        ),
+        None => "bubblewrap not found, and OverlayFS via mount(8) requires root".to_string(),
+    })
+}
+
 /// Execute the appropriate tier for the given binary.
 ///
 /// Full resolution flow:
@@ -39,8 +103,14 @@ pub fn execute(
     app_db: &appdb::AppDatabase,
 ) -> Result<ExitCode> {
     // --- Step 1: Exact hash match in rules.json ---
+    // This is the only path that counts as an *explicit, user-authored*
+    // decision: the user (or --trust) put this hash in rules.json themselves.
+    // App-database matches and wizard heuristics are APEX-WIN's own guesses,
+    // not a promise the user made — that distinction is what fail-secure
+    // Tier 3 handling below depends on.
+    let explicit_entry = rules::lookup_by_hash(rules, hash).cloned();
     let mut matched_entry: Option<win_sandbox_common::rules_schema::RuleEntry> =
-        rules::lookup_by_hash(rules, hash).cloned();
+        explicit_entry.clone();
 
     // --- Step 2: Name-based match in app database ---
     if matched_entry.is_none() {
@@ -96,22 +166,31 @@ pub fn execute(
     }
 
     // --- Step 6: Resolve tier ---
-    let tier = if let Some(ref tier_str) = args.tier {
-        let t: Tier = tier_str.parse()?;
-        info!("Forced tier: {t}");
-        t
-    } else if let Some(ref entry) = matched_entry {
-        info!("Matched rule '{}', tier: {}", entry.name, entry.tier);
-        entry.tier
-    } else if is_untrusted_path(exe) {
-        let t = rules.defaults.untrusted_path_tier;
-        warn!("Untrusted path '{}', using tier {t}", exe);
-        t
-    } else {
-        let t = rules.defaults.unmapped_tier;
-        info!("No rule matched, using default tier {t}");
-        t
-    };
+    let (tier, tier_is_explicit) = resolve_tier(args, exe, rules, &explicit_entry, &matched_entry)?;
+
+    // Fail secure: an explicit Tier 3 request must get real ephemeral-overlay
+    // isolation or be refused, not silently served as Tier 2. Tier 2 and
+    // Tier 3 have different threat models (persistent bwrap namespace vs.
+    // OverlayFS changes discarded on exit); an app the user explicitly
+    // pinned to Tier 3 may be relying on that guarantee.
+    if tier == Tier::Tier3 && tier_is_explicit {
+        let caps = crate::capabilities::Capabilities::detect();
+        if let Err(reason) = check_tier3_available(caps.tier3_available(), &caps.bwrap_version) {
+            if args.dry_run {
+                info!(
+                    "[DRY RUN] Tier 3 was explicitly requested for {exe} but is not available: \
+                     {reason}. A real run would refuse rather than silently use Tier 2."
+                );
+                return Ok(ExitCode::SUCCESS);
+            }
+            bail!(
+                "Refusing to run '{exe}': Tier 3 was explicitly requested but this host cannot \
+                 provide it ({reason}). Serving it as Tier 2 would silently weaken an isolation \
+                 guarantee you asked for. Use --tier 2 to accept that explicitly, or install \
+                 bubblewrap >= 0.10 for real Tier 3 support."
+            );
+        }
+    }
 
     let network = resolve_network_permission(rules, hash);
     info!("Network access: {network}");
@@ -190,6 +269,37 @@ mod tests {
         }
     }
 
+    /// Minimal `Args` for tests that only exercise tier resolution, following
+    /// the same literal pattern used in tier1.rs's tests (no `Default` impl
+    /// exists on `Args` because clap derives its own construction).
+    fn test_args(tier: Option<&str>) -> Args {
+        Args {
+            exe: Some("/home/test/game.exe".into()),
+            tier: tier.map(String::from),
+            rules: None,
+            verbose: false,
+            no_gui: true,
+            dry_run: false,
+            gamepad: false,
+            nested_x11: false,
+            xvfb: false,
+            host_x11: false,
+            wayland: false,
+            args: vec![],
+            trust: false,
+            optimize_net: false,
+            cleanup_net: false,
+            configure_net: false,
+            daemon: false,
+            status: false,
+            reload: false,
+            stop: false,
+            unregister: false,
+            user_env: std::collections::HashMap::new(),
+            uid: None,
+        }
+    }
+
     #[test]
     fn untrusted_paths_detected() {
         assert!(is_untrusted_path("/tmp/foo.exe"));
@@ -242,5 +352,152 @@ mod tests {
 
         assert!(entry.trusted);
         assert_eq!(entry.env.get("DXVK_HUD").unwrap(), "1");
+    }
+
+    // --- resolve_tier: explicit vs heuristic provenance ---
+    //
+    // This is the behavior the fail-secure Tier 3 check depends on entirely:
+    // it only refuses when `tier_is_explicit` is true. Every branch of
+    // resolve_tier needs its own test to pin which ones set that flag.
+
+    #[test]
+    fn resolve_tier_cli_flag_is_explicit() {
+        let args = test_args(Some("3"));
+        let rules = RulesFile {
+            version: 1,
+            entries: vec![],
+            defaults: RuleDefaults::default(),
+        };
+        let (tier, explicit) = resolve_tier(&args, "/home/u/x.exe", &rules, &None, &None).unwrap();
+        assert_eq!(tier, Tier::Tier3);
+        assert!(explicit, "--tier flag must count as an explicit request");
+    }
+
+    #[test]
+    fn resolve_tier_explicit_rule_is_explicit() {
+        let args = test_args(None);
+        let rules = RulesFile {
+            version: 1,
+            entries: vec![],
+            defaults: RuleDefaults::default(),
+        };
+        let entry = make_entry("h1", Tier::Tier3, false, false);
+        let (tier, explicit) = resolve_tier(
+            &args,
+            "/home/u/x.exe",
+            &rules,
+            &Some(entry.clone()),
+            &Some(entry),
+        )
+        .unwrap();
+        assert_eq!(tier, Tier::Tier3);
+        assert!(
+            explicit,
+            "a hash the user put in rules.json is an explicit promise"
+        );
+    }
+
+    #[test]
+    fn resolve_tier_app_database_match_is_not_explicit() {
+        // matched_entry set (app-database/wizard match) but explicit_entry is
+        // None: this is APEX-WIN's own guess, not something the user typed.
+        let args = test_args(None);
+        let rules = RulesFile {
+            version: 1,
+            entries: vec![],
+            defaults: RuleDefaults::default(),
+        };
+        let heuristic_entry = make_entry("h1", Tier::Tier3, false, false);
+        let (tier, explicit) = resolve_tier(
+            &args,
+            "/home/u/x.exe",
+            &rules,
+            &None,
+            &Some(heuristic_entry),
+        )
+        .unwrap();
+        assert_eq!(tier, Tier::Tier3);
+        assert!(
+            !explicit,
+            "an app-database/wizard match must NOT count as explicit, even at tier 3"
+        );
+    }
+
+    #[test]
+    fn resolve_tier_untrusted_path_fallback_is_not_explicit() {
+        let args = test_args(None);
+        let rules = RulesFile {
+            version: 1,
+            entries: vec![],
+            defaults: RuleDefaults {
+                unmapped_tier: Tier::Tier0,
+                untrusted_path_tier: Tier::Tier3,
+                network_default: false,
+                gpu_default: false,
+            },
+        };
+        let (tier, explicit) =
+            resolve_tier(&args, "/tmp/unknown.exe", &rules, &None, &None).unwrap();
+        assert_eq!(tier, Tier::Tier3);
+        assert!(
+            !explicit,
+            "the untrusted-path default is a heuristic, not a promise"
+        );
+    }
+
+    #[test]
+    fn resolve_tier_unmapped_fallback_is_not_explicit() {
+        let args = test_args(None);
+        let rules = RulesFile {
+            version: 1,
+            entries: vec![],
+            defaults: RuleDefaults {
+                unmapped_tier: Tier::Tier3,
+                untrusted_path_tier: Tier::Tier2,
+                network_default: false,
+                gpu_default: false,
+            },
+        };
+        let (tier, explicit) =
+            resolve_tier(&args, "/home/u/unknown.exe", &rules, &None, &None).unwrap();
+        assert_eq!(tier, Tier::Tier3);
+        assert!(
+            !explicit,
+            "the unmapped-binary default is a heuristic, not a promise"
+        );
+    }
+
+    #[test]
+    fn resolve_tier_invalid_cli_flag_errors() {
+        let args = test_args(Some("not-a-tier"));
+        let rules = RulesFile {
+            version: 1,
+            entries: vec![],
+            defaults: RuleDefaults::default(),
+        };
+        assert!(resolve_tier(&args, "/home/u/x.exe", &rules, &None, &None).is_err());
+    }
+
+    // --- check_tier3_available: the actual fail-secure gate ---
+
+    #[test]
+    fn tier3_available_when_capability_present() {
+        assert!(check_tier3_available(true, &Some("0.10.0".into())).is_ok());
+    }
+
+    #[test]
+    fn tier3_unavailable_reports_bwrap_version_when_known() {
+        let err = check_tier3_available(false, &Some("0.9.0".into())).unwrap_err();
+        assert!(
+            err.contains("0.9.0"),
+            "refusal reason must name the installed version so a user can act on it: {err}"
+        );
+        assert!(err.contains(">= 0.10.0"));
+    }
+
+    #[test]
+    fn tier3_unavailable_reports_missing_bwrap() {
+        let err = check_tier3_available(false, &None).unwrap_err();
+        assert!(err.contains("not found"));
     }
 }

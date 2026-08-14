@@ -100,7 +100,14 @@ pub fn run(args: &Args) -> Result<ExitCode> {
 }
 
 /// Detect the highest Landlock ABI version the kernel supports.
-fn detect_landlock_abi() -> Result<ABI> {
+///
+/// `Ruleset::default()` already probes the running kernel (via
+/// `LandlockStatus::current()`), so `handle_access()` failing here reflects a
+/// real unsupported ABI, not a guess — verified empirically against
+/// `.create()` returning the same result for every ABI level on this kernel.
+/// `capabilities::Capabilities::detect()` calls this rather than
+/// re-implementing the probe, so there is one place that can be wrong.
+pub fn detect_landlock_abi() -> Result<ABI> {
     for abi in [ABI::V4, ABI::V3, ABI::V2, ABI::V1] {
         let result = Ruleset::default().handle_access(AccessFs::from_all(abi));
         if result.is_ok() {

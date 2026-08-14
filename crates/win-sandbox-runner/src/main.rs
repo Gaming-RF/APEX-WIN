@@ -1,6 +1,7 @@
 mod amd;
 mod appdb;
 mod audio;
+mod capabilities;
 mod cleanup;
 mod config;
 mod daemon;

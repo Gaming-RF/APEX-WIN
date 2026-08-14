@@ -26,6 +26,12 @@ pub struct DaemonState {
     #[allow(dead_code)]
     pub config: crate::config::Config,
     pub net_config: netopt::NetOptimizerConfig,
+    /// Host sandbox capabilities (Landlock ABI, bwrap version, overlay
+    /// support), probed once at startup. `--status` reports this so "is
+    /// Tier 3 real on this machine" is answerable without reading source or
+    /// grepping the journal — the same question dispatch's fail-secure Tier 3
+    /// check answers for itself on every explicit Tier 3 launch.
+    pub capabilities: crate::capabilities::Capabilities,
     /// Track how many .exe launches we've handled.
     pub launch_count: u64,
     /// Track per-exe launch history (exe path -> count).
@@ -43,11 +49,18 @@ impl DaemonState {
         // runs as root and its own HOME is /root or unset.
         let config = crate::config::load_config(None);
         let net_config = netopt::load_config(None);
+        let capabilities = crate::capabilities::Capabilities::detect();
 
         info!(
             "Daemon state loaded: {} app profiles, {} rules",
             app_db.profiles.len(),
             rules.entries.len()
+        );
+        info!(
+            "Sandbox capabilities: landlock_abi={:?} bwrap={:?} tier3_available={}",
+            capabilities.landlock_abi,
+            capabilities.bwrap_version,
+            capabilities.unprivileged_overlay
         );
 
         Ok(Self {
@@ -55,6 +68,7 @@ impl DaemonState {
             rules,
             config,
             net_config,
+            capabilities,
             launch_count: 0,
             launch_history: HashMap::new(),
         })
@@ -268,6 +282,34 @@ fn spawn_ipc_listener(
     Ok(handle)
 }
 
+/// Build the JSON body for the `status` IPC command.
+///
+/// Pulled out of `handle_ipc_command` so the format is directly testable
+/// without a running daemon (constructing a full `DaemonState` for a unit
+/// test would need a real `AppDatabase`/`RulesFile`, which is heavier than
+/// this warrants).
+fn build_status_json(
+    launch_count: u64,
+    app_profiles: usize,
+    rules_count: usize,
+    caps: &crate::capabilities::Capabilities,
+) -> String {
+    format!(
+        r#"{{"launch_count":{},"app_profiles":{},"rules":{},"uptime":"running","landlock_abi":{},"bwrap_version":{},"tier3_available":{}}}"#,
+        launch_count,
+        app_profiles,
+        rules_count,
+        caps.landlock_abi
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "null".to_string()),
+        caps.bwrap_version
+            .as_ref()
+            .map(|v| format!("\"{v}\""))
+            .unwrap_or_else(|| "null".to_string()),
+        caps.unprivileged_overlay,
+    )
+}
+
 /// Handle a single IPC command.
 fn handle_ipc_command(
     mut stream: UnixStream,
@@ -283,11 +325,11 @@ fn handle_ipc_command(
 
     let response = if cmd == "status" {
         let state = state.lock().unwrap();
-        format!(
-            r#"{{"launch_count":{},"app_profiles":{},"rules":{},"uptime":"running"}}"#,
+        build_status_json(
             state.launch_count,
             state.app_db.profiles.len(),
             state.rules.entries.len(),
+            &state.capabilities,
         )
     } else if cmd == "reload" {
         let mut state = state.lock().unwrap();
@@ -649,6 +691,56 @@ pub fn send_command(cmd: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn caps(
+        landlock_abi: Option<u8>,
+        bwrap_version: Option<&str>,
+        overlay: bool,
+    ) -> crate::capabilities::Capabilities {
+        crate::capabilities::Capabilities {
+            landlock_abi,
+            bwrap_version: bwrap_version.map(String::from),
+            unprivileged_overlay: overlay,
+        }
+    }
+
+    /// `--status` output must stay valid JSON with the capability fields a
+    /// caller (a future CI acceptance check, or a human running --status by
+    /// hand) can parse, matching what was measured by hand on this session's
+    /// machine: Landlock ABI v4/v8 depending on kernel, bwrap 0.9.0,
+    /// tier3_available=false.
+    #[test]
+    fn status_json_is_valid_and_matches_capabilities() {
+        let json = build_status_json(3, 35, 7, &caps(Some(4), Some("0.9.0"), false));
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("must be valid JSON");
+
+        assert_eq!(parsed["launch_count"], 3);
+        assert_eq!(parsed["app_profiles"], 35);
+        assert_eq!(parsed["rules"], 7);
+        assert_eq!(parsed["landlock_abi"], 4);
+        assert_eq!(parsed["bwrap_version"], "0.9.0");
+        assert_eq!(parsed["tier3_available"], false);
+    }
+
+    /// A host with no bwrap or unusable Landlock must serialize as JSON
+    /// `null`, not a Rust `None` string or an invalid literal, or every
+    /// consumer of --status has to special-case a malformed field.
+    #[test]
+    fn status_json_handles_missing_capabilities_as_null() {
+        let json = build_status_json(0, 0, 0, &caps(None, None, false));
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("must be valid JSON");
+
+        assert!(parsed["landlock_abi"].is_null());
+        assert!(parsed["bwrap_version"].is_null());
+        assert_eq!(parsed["tier3_available"], false);
+    }
+
+    #[test]
+    fn status_json_reports_tier3_available_true() {
+        let json = build_status_json(0, 0, 0, &caps(Some(4), Some("0.10.0"), true));
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["tier3_available"], true);
+    }
 
     #[test]
     fn fifo_path_format() {
