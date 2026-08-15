@@ -30,6 +30,40 @@ check_platform() {
     fi
 }
 
+# Unlike scripts/install.sh, this script must NOT be run as root outright:
+# it writes per-user files (~/.config/win-sandbox, ~/Library/LaunchAgents)
+# whose ownership would end up as root and then be unusable by the user's
+# own LaunchAgent. But two of its targets (the bin directory and
+# /Applications) may need elevation depending on the machine. So instead of
+# a blanket root check, elevate per-target only where the filesystem says
+# it is actually needed.
+check_not_root() {
+    if [[ $EUID -eq 0 ]]; then
+        error "Do not run this with sudo. It installs per-user files into \$HOME
+(~/.config/win-sandbox, ~/Library/LaunchAgents) which must belong to you, not root.
+It will prompt for sudo only for the specific steps that need it."
+    fi
+}
+
+# Echo "sudo" when the given directory requires elevation to write, else
+# echo nothing. Checked against the real filesystem rather than assumed:
+# /opt/homebrew/bin is typically owned by the installing user (no sudo
+# needed), while /usr/local/bin and /Applications usually are not.
+sudo_for() {
+    local target="$1"
+    # Walk up to the nearest existing ancestor: writing a new file into a
+    # directory needs write permission on that directory, and creating the
+    # directory itself needs it on the parent.
+    while [[ ! -e "$target" && "$target" != "/" ]]; do
+        target="$(dirname "$target")"
+    done
+    if [[ -w "$target" ]]; then
+        echo ""
+    else
+        echo "sudo"
+    fi
+}
+
 check_deps() {
     local missing=()
     for cmd in cargo; do
@@ -66,16 +100,26 @@ build_rust() {
 
 install_binary() {
     local bindir="$1"
+    local sudo_cmd
+    sudo_cmd="$(sudo_for "$bindir")"
     info "Installing win-sandbox-runner to ${bindir}..."
-    mkdir -p "$bindir"
-    install -m755 target/release/win-sandbox-runner "${bindir}/win-sandbox-runner"
+    if [[ -n "$sudo_cmd" ]]; then
+        warn "${bindir} is not writable by you; requesting sudo for this step"
+    fi
+    $sudo_cmd mkdir -p "$bindir"
+    $sudo_cmd install -m755 target/release/win-sandbox-runner "${bindir}/win-sandbox-runner"
 }
 
 install_app_bundle() {
+    local sudo_cmd
+    sudo_cmd="$(sudo_for "/Applications/APEX-WIN.app")"
     info "Installing APEX-WIN.app to /Applications..."
-    rm -rf "/Applications/APEX-WIN.app"
-    cp -R "macos/APEX-WIN.app" "/Applications/APEX-WIN.app"
-    chmod +x "/Applications/APEX-WIN.app/Contents/MacOS/apex-win-launcher"
+    if [[ -n "$sudo_cmd" ]]; then
+        warn "/Applications is not writable by you; requesting sudo for this step"
+    fi
+    $sudo_cmd rm -rf "/Applications/APEX-WIN.app"
+    $sudo_cmd cp -R "macos/APEX-WIN.app" "/Applications/APEX-WIN.app"
+    $sudo_cmd chmod +x "/Applications/APEX-WIN.app/Contents/MacOS/apex-win-launcher"
 
     # Register the bundle's document type claim (com.microsoft.windows-
     # executable) with Launch Services immediately, rather than waiting for
@@ -84,6 +128,9 @@ install_app_bundle() {
     # binfmt_misc registration instead of only waiting for systemd-binfmt.
     local lsregister="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
     if [[ -x "$lsregister" ]]; then
+        # Deliberately NOT elevated: Launch Services registrations are
+        # per-user, so registering as root would populate root's database
+        # instead of the database Finder consults for this user.
         "$lsregister" -f "/Applications/APEX-WIN.app"
         info "Registered APEX-WIN.app with Launch Services"
     else
@@ -141,6 +188,7 @@ main() {
     echo ""
 
     check_platform
+    check_not_root
     check_deps
 
     local bindir

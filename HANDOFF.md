@@ -280,6 +280,18 @@ there is no binfmt_misc equivalent, so `run_daemon()`'s root check is now
 root-owned shared path) via a new `runtime_dir_base()` function instead of
 the Linux-only `RUNTIME_DIR_BASE` const.
 
+The daemon **refuses to start on macOS if `$TMPDIR` is unset** rather than
+falling back to `/tmp`. This was a real bug caught in review of the first
+version of this port: `$TMPDIR` is per-user and mode 0700, which is exactly
+what makes it safe to host a FIFO and IPC socket that control process
+launches, while `/tmp` is mode 1777 and shared by every local user. The
+directory mode and FIFO mode are also now least-privilege per platform
+(Linux 1777/0666, because the root daemon must accept writes from
+unprivileged users via binfmt_misc; macOS 0700/0600, because the daemon and
+its only writer are the same unprivileged user). Three tests pin this down,
+including one asserting the runtime dir never resolves under any of
+`/tmp`, `/var/tmp`, `/private/tmp`, `/var/run`, `/private/var/run`.
+
 **Path A (double-click) does NOT depend on the daemon at all, on either
 platform.** On macOS it's Launch Services resolving the
 `com.microsoft.windows-executable` UTI to `macos/APEX-WIN.app`
@@ -308,7 +320,7 @@ transparently routes a bare `./game.exe` through the daemon there.
 | `macos/APEX-WIN.app/Contents/Info.plist` | UTI document-type claim (`com.microsoft.windows-executable`), `LSUIElement=true` (no Dock icon) |
 | `macos/APEX-WIN.app/Contents/MacOS/apex-win-launcher` | Shell shim: forwards Launch Services' opened-file argv to `win-sandbox-runner --exe` |
 | `macos/com.apex-win.daemon.plist` | launchd LaunchAgent (per-user, not root); `@BINDIR@` placeholder substituted by the installer |
-| `scripts/install-macos.sh` | macOS installer: detects Homebrew prefix (Apple Silicon vs Intel differ), builds `-p win-sandbox-runner -p win-sandbox-common` only, installs the app bundle, registers it via `lsregister`, writes per-user config (no macOS equivalent of `/etc/win-sandbox-runner`, and none is needed — `config.rs`'s search paths already fall back to `None` gracefully when a path doesn't exist) |
+| `scripts/install-macos.sh` | macOS installer: detects Homebrew prefix (Apple Silicon vs Intel differ), builds `-p win-sandbox-runner -p win-sandbox-common` only, installs the app bundle, registers it via `lsregister`, writes per-user config (no macOS equivalent of `/etc/win-sandbox-runner`, and none is needed — `config.rs`'s search paths already fall back to `None` gracefully when a path doesn't exist). Privilege model is per-target, unlike Linux's `install.sh` which simply requires root throughout: this script **refuses to run under sudo** (it writes `~/.config` and `~/Library/LaunchAgents`, which must belong to the user, not root) and elevates only the specific steps whose target directory is not writable, tested with `-w` against the real filesystem rather than assumed (`/opt/homebrew/bin` is usually user-owned; `/usr/local/bin` and `/Applications` usually are not). `lsregister` is deliberately never elevated, since Launch Services registrations are per-user. |
 | `crates/win-sandbox-runner/src/capabilities.rs` | Added `seatbelt_available: Option<bool>` (macOS-only, `None` elsewhere — deliberately not `Some(false)`, so callers can distinguish "not applicable" from "checked and absent"), `tier12_available()` |
 | `crates/win-sandbox-runner/src/dispatch.rs` | Added `check_tier_implemented()`, thin wrapper around `check_tier_implemented_for_os()` (OS taken as a parameter instead of read via `cfg!`, so both the Linux and non-Linux branches are unit-testable on any single host OS — 9 new tests) |
 | `crates/win-sandbox-runner/src/daemon.rs` | Platform-gated root check in `run_daemon()`; `runtime_dir_base()` replaces the Linux-only `RUNTIME_DIR_BASE` const as the thing callers actually use; `fifo_path()` made `pub(crate)` so `main.rs` calls it instead of hardcoding a second copy of the literal (this project has hit the "same string duplicated, one copy drifts" bug three times before with the binfmt mask, so a second FIFO-path literal was fixed on sight rather than left as a fourth instance waiting to happen); `--status` JSON gained `seatbelt_available` and `tier1_2_available` fields |

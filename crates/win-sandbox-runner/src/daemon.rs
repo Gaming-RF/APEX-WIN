@@ -111,21 +111,57 @@ impl DaemonState {
 #[cfg(target_os = "linux")]
 const RUNTIME_DIR_BASE: &str = "/run/win-sandbox-runner";
 
-/// Runtime directory base for macOS: `$TMPDIR/win-sandbox-runner`, falling
-/// back to `/tmp/win-sandbox-runner` if `$TMPDIR` is unset (should not
-/// happen under launchd, which always sets it, but a bare `cargo run`
-/// during development might not).
+/// Runtime directory base for macOS: `$TMPDIR/win-sandbox-runner`.
+///
+/// `$TMPDIR` on macOS is a per-user, private directory (mode 0700, created
+/// by the OS at login), which is what makes it safe to host a FIFO and an
+/// IPC socket that control process launches.
+///
+/// There is deliberately NO fallback to `/tmp`. An earlier version of this
+/// function fell back to `/tmp` when `$TMPDIR` was unset, which was wrong:
+/// `/tmp` is mode 1777 and shared by every user on the machine, so the
+/// daemon's FIFO (created 0666) and IPC socket would have been reachable by
+/// any local user, and the containing directory would have been a symlink-
+/// swap target. `$TMPDIR`'s 0700 parent is precisely the property that
+/// makes the 1777 mode set in `ensure_runtime_dir` harmless; `/tmp` has no
+/// such parent, so the same mode there is a real exposure rather than a
+/// cosmetic one. Failing loudly is correct: launchd always sets `$TMPDIR`,
+/// so an unset value means something is wrong with the environment, and
+/// silently downgrading to a world-writable location is not a safe
+/// interpretation of "something is wrong".
 #[cfg(not(target_os = "linux"))]
-fn runtime_dir_base() -> PathBuf {
-    let tmp = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
+fn runtime_dir_base_checked() -> Result<PathBuf> {
+    let tmp = std::env::var("TMPDIR")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .context(
+            "TMPDIR is not set. The macOS daemon stores its FIFO and IPC socket there \
+             because it is private to your user (mode 0700). Refusing to fall back to \
+             /tmp, which every user on this machine can write to. launchd always sets \
+             TMPDIR; if you are running the daemon by hand, set it first.",
+        )?;
     // TMPDIR on macOS is typically already-slash-terminated
     // (e.g. "/var/folders/.../T/"); trim so join() doesn't produce "//".
-    PathBuf::from(tmp.trim_end_matches('/')).join("win-sandbox-runner")
+    Ok(PathBuf::from(tmp.trim_end_matches('/')).join("win-sandbox-runner"))
 }
 
 #[cfg(target_os = "linux")]
+fn runtime_dir_base_checked() -> Result<PathBuf> {
+    Ok(PathBuf::from(RUNTIME_DIR_BASE))
+}
+
+/// Infallible view of [`runtime_dir_base_checked`], for the paths that only
+/// build a path string and cannot meaningfully fail (`--status`/`--stop`
+/// clients, cleanup on shutdown). If `$TMPDIR` is missing on macOS this
+/// yields a path under a non-existent-by-design directory, so those callers
+/// simply find no daemon, which is the correct outcome: without `$TMPDIR`
+/// the daemon refused to start in the first place.
 fn runtime_dir_base() -> PathBuf {
-    PathBuf::from(RUNTIME_DIR_BASE)
+    runtime_dir_base_checked().unwrap_or_else(|_| {
+        // Not a usable runtime dir, and deliberately not /tmp: a path that
+        // cannot exist is safer than one every local user can write to.
+        PathBuf::from("/nonexistent/win-sandbox-runner")
+    })
 }
 
 /// Paths used by the daemon.
@@ -150,17 +186,31 @@ fn pid_path() -> PathBuf {
 
 /// Ensure the runtime directory exists with correct permissions.
 fn ensure_runtime_dir() -> Result<()> {
-    let dir = runtime_dir_base();
+    // Checked variant: on macOS this refuses (rather than silently using a
+    // world-writable /tmp) when $TMPDIR is missing. This is the daemon
+    // startup path, so failing here correctly prevents the daemon from
+    // running at all with an unsafe runtime directory.
+    let dir = runtime_dir_base_checked()?;
     if !dir.exists() {
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("Failed to create {} (are you root?)", dir.display()))?;
-        // Allow any user to write to the FIFO (for binfmt_misc). Only
-        // meaningful on Linux, where the daemon is root and other UIDs need
-        // to reach the FIFO; on macOS the daemon already runs as the same
-        // user that will write to it, so world-writability isn't needed —
-        // but setting it anyway does no harm and keeps this one code path
-        // shared instead of adding a second cfg branch for a cosmetic mode.
-        std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o1777))?;
+        // Linux: the daemon runs as root while the users launching .exe
+        // files do not, and they must be able to write the FIFO, so the
+        // directory is 1777 (sticky, like /tmp) by necessity.
+        //
+        // macOS: the daemon runs as the same unprivileged user that writes
+        // to the FIFO, so no cross-user access is needed at all. 0700 is
+        // both sufficient and strictly safer. An earlier version shared the
+        // 1777 path across both platforms "because it does no harm" — that
+        // was only true while the parent was $TMPDIR (0700); it granted
+        // real cross-user access the moment the path was anywhere else.
+        // Granting the minimum each platform actually requires removes the
+        // dependency on that assumption entirely.
+        #[cfg(target_os = "linux")]
+        let mode = 0o1777;
+        #[cfg(not(target_os = "linux"))]
+        let mode = 0o700;
+        std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(mode))?;
     }
     Ok(())
 }
@@ -255,10 +305,29 @@ fn create_fifo() -> Result<()> {
         std::fs::remove_file(&path)?;
     }
 
-    // Create FIFO with permissions allowing any user to write
+    // Linux: the daemon is root and the users launching .exe files are not,
+    // so the FIFO must be writable by them (0666); the binfmt_misc handler
+    // in main.rs writes launch requests to it as the invoking user.
+    //
+    // macOS: there is no binfmt_misc, the daemon runs as the same
+    // unprivileged user that would write to the FIFO, and nothing else ever
+    // writes to it, so 0600 is sufficient. Anything wider would let any
+    // local user submit launch requests to this user's daemon for no
+    // benefit.
+    // Kept as u32 (what PermissionsExt::from_mode takes) and narrowed only
+    // at the mkfifo call. libc::mode_t is u32 on Linux but u16 on macOS, so
+    // typing this as mode_t instead would make the from_mode call need a
+    // widening conversion that is mandatory on macOS and a
+    // clippy::useless_conversion error on Linux. Converting in one
+    // direction only, at the single point that needs it, avoids that.
+    #[cfg(target_os = "linux")]
+    let fifo_mode: u32 = 0o666;
+    #[cfg(not(target_os = "linux"))]
+    let fifo_mode: u32 = 0o600;
+
     unsafe {
         let c_path = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
-        let ret = libc::mkfifo(c_path.as_ptr(), 0o666);
+        let ret = libc::mkfifo(c_path.as_ptr(), fifo_mode as libc::mode_t);
         if ret != 0 {
             return Err(anyhow::anyhow!(
                 "Failed to create FIFO at {}: {}",
@@ -268,8 +337,13 @@ fn create_fifo() -> Result<()> {
         }
     }
 
-    // Set permissions to world-writable (any user launching .exe needs to write)
-    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o666))?;
+    // mkfifo's mode is masked by the process umask, so set it explicitly
+    // afterwards to get the intended bits regardless of the umask the
+    // daemon inherited.
+    std::fs::set_permissions(
+        &path,
+        std::os::unix::fs::PermissionsExt::from_mode(fifo_mode),
+    )?;
 
     debug!("FIFO created at {}", path.display());
     Ok(())
@@ -927,6 +1001,65 @@ mod tests {
             dir,
             std::path::PathBuf::from("/var/run/win-sandbox-runner"),
             "must not resolve to a root-owned shared path"
+        );
+    }
+
+    /// The previous version of this test asserted only that the path wasn't
+    /// `/var/run`, while its own doc comment claimed "never a shared
+    /// location". That gap let a `/tmp` fallback ship: `/tmp` is mode 1777
+    /// and shared by every local user, exactly the thing the comment said
+    /// was forbidden, and no assertion contradicted it. These cases pin the
+    /// actual claim down.
+    #[test]
+    #[cfg(not(target_os = "linux"))]
+    fn runtime_dir_base_never_resolves_to_a_world_writable_dir() {
+        let dir = runtime_dir_base();
+        for shared in [
+            "/tmp",
+            "/var/tmp",
+            "/private/tmp",
+            "/var/run",
+            "/private/var/run",
+        ] {
+            assert!(
+                !dir.starts_with(shared),
+                "runtime dir {} is under {shared}, which every local user can write to; \
+                 the FIFO and IPC socket there control process launches",
+                dir.display()
+            );
+        }
+    }
+
+    /// With TMPDIR unset the daemon must refuse to start, not silently pick
+    /// a world-writable directory. This is the check that would have caught
+    /// the `/tmp` fallback directly.
+    #[test]
+    #[cfg(not(target_os = "linux"))]
+    fn runtime_dir_base_checked_refuses_when_tmpdir_missing() {
+        // Safety: single-threaded test process; restored before returning.
+        let saved = std::env::var("TMPDIR").ok();
+
+        std::env::remove_var("TMPDIR");
+        let missing = runtime_dir_base_checked();
+
+        std::env::set_var("TMPDIR", "   ");
+        let blank = runtime_dir_base_checked();
+
+        std::env::set_var("TMPDIR", "/var/folders/ab/cd/T/");
+        let ok = runtime_dir_base_checked();
+
+        match saved {
+            Some(v) => std::env::set_var("TMPDIR", v),
+            None => std::env::remove_var("TMPDIR"),
+        }
+
+        assert!(missing.is_err(), "unset TMPDIR must refuse, not fall back");
+        assert!(blank.is_err(), "blank TMPDIR must refuse, not fall back");
+        let ok = ok.expect("a real TMPDIR must be accepted");
+        assert_eq!(
+            ok,
+            std::path::PathBuf::from("/var/folders/ab/cd/T/win-sandbox-runner"),
+            "trailing slash on TMPDIR must not produce a doubled separator"
         );
     }
 
