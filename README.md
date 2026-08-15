@@ -1,35 +1,101 @@
 # win-sandbox-runner
 
-A transparent, tiered sandbox for running Windows executables via Wine on Linux.
+A transparent, tiered sandbox for running Windows executables via Wine.
 
-Intercepts `.exe` launches via Linux `binfmt_misc`, hashes each binary against a policy rules file, and dispatches it to one of four isolation tiers — from direct execution to ephemeral RAM overlays.
+Double-click any `.exe` and it runs inside an isolation tier chosen from a policy
+file, with no terminal step. Each binary is hashed (SHA-256) and matched against
+`rules.json` and a built-in app database to decide how much isolation it gets.
+
+**Linux is the primary platform** and the only one with real sandboxing.
+macOS is supported for running `.exe` files through Wine, but **without any
+isolation** — see [Platform support](#platform-support) before relying on it.
 
 ## Architecture
 
+There are two independent launch paths on Linux, and both are needed. They are
+not alternatives to each other.
+
+**Path A — file manager double-click (the primary experience)**
+
 ```
-User runs .exe
+Double-click .exe in the file manager
     │
     ▼
-binfmt_misc intercepts → win-sandbox-runner
+Desktop resolves the file type and launches the registered handler
+  Linux: apex-win.desktop  (MIME: application/vnd.microsoft.portable-executable)
+  macOS: APEX-WIN.app      (UTI:  com.microsoft.windows-executable)
     │
+    ▼
+win-sandbox-runner --exe <path>   →  hash → rules → tier → Wine
+```
+
+A file manager never `exec()`s the file, so `binfmt_misc` is not involved in
+this path at all. Without the handler installed, double-click does nothing
+useful no matter how correct the daemon is.
+
+**Path B — terminal / script execution (Linux only)**
+
+```
+Run ./game.exe directly
+    │
+    ▼
+Kernel sees the MZ header → binfmt_misc → win-sandbox-runner
+    │
+    ▼
+Daemon FIFO (with user env) → hash → rules → tier → Wine
+```
+
+macOS has no `binfmt_misc` equivalent, so Path B does not exist there.
+
+Both paths converge on the same dispatch:
+
+```
     ├─ Hash binary (SHA-256)
-    ├─ Lookup rules.json
-    ├─ If GUI enabled: prompt user (GTK4 dialog)
+    ├─ Lookup rules.json + built-in app database
+    ├─ If GUI enabled: prompt user (GTK4 dialog, Linux only)
     │
     ├─ Tier 0: Direct wine exec (sanitized env only)
-    ├─ Tier 1: Landlock LSM filesystem restrictions
-    ├─ Tier 2: Bubblewrap container (namespace isolation)
-    └─ Tier 3: OverlayFS ephemeral (RAM-backed, changes lost)
+    ├─ Tier 1: Landlock LSM filesystem restrictions      (Linux only)
+    ├─ Tier 2: Bubblewrap container (namespace isolation) (Linux only)
+    └─ Tier 3: OverlayFS ephemeral (RAM-backed)           (Linux only)
 ```
+
+### Which path runs as whom
+
+Path A runs **entirely as the invoking user**; the root daemon is never
+involved, so Windows binaries never execute as root. Path B is the only one
+that reaches the root daemon, which then drops to the calling user's UID for
+the actual Wine process.
+
+## Platform support
+
+| | Linux | macOS |
+|---|---|---|
+| Run `.exe` via Wine | yes | yes |
+| Double-click handler | yes (`apex-win.desktop`) | yes (`APEX-WIN.app`) |
+| Auto-intercept bare `./game.exe` | yes (`binfmt_misc`) | no (no OS equivalent) |
+| Tier 0 (no isolation) | yes | yes |
+| Tier 1 / 2 / 3 (real isolation) | yes | **no** |
+| Background daemon | systemd, runs as root | launchd LaunchAgent, per-user |
+| GUI (`win-sandbox-gui`) | yes | no (GTK4/libadwaita) |
+
+**On macOS every `.exe` runs at Tier 0, with no sandbox isolation from the rest
+of your system.** Tiers 1-3 are built on Landlock, bubblewrap and OverlayFS,
+which are Linux kernel features with no macOS equivalent, so they are compiled
+out entirely rather than faked. Asking for one explicitly (`--tier 2`, or a
+rule pinning a hash to it) is **refused with an error**, not silently
+downgraded; a tier merely *suggested* by the app database falls back to Tier 0
+with a loud warning. macOS `sandbox-exec` (Seatbelt) is detected and reported
+by `--status`, but nothing is built on it yet, so it grants no protection today.
 
 ## Tiers
 
-| Tier | Isolation | Filesystem | Network | Performance |
-|------|-----------|-----------|---------|-------------|
-| 0 | None | Host | Host | Native |
-| 1 | Landlock | Read-only allowlist | Host (partial) | Native |
-| 2 | Bubblewrap | Isolated tmpfs | TAP bridge | Near-native |
-| 3 | OverlayFS | RAM ephemeral | TAP bridge | Near-native |
+| Tier | Isolation | Filesystem | Network | Performance | Platform |
+|------|-----------|-----------|---------|-------------|----------|
+| 0 | None | Host | Host | Native | Linux, macOS |
+| 1 | Landlock | Read-only allowlist | Host (partial) | Native | Linux only |
+| 2 | Bubblewrap | Isolated tmpfs | TAP bridge | Near-native | Linux only |
+| 3 | OverlayFS | RAM ephemeral | TAP bridge | Near-native | Linux only |
 
 ### Tier 0 — Direct
 Runs Wine directly with a sanitized environment. All secrets, proxy configs, and sensitive variables are stripped. Suitable for trusted binaries.
@@ -49,20 +115,23 @@ Full namespace isolation via `bwrap`. The binary runs in its own mount/PID/IPC n
 ### Tier 3 — OverlayFS Ephemeral
 Same as Tier 2 but with an OverlayFS layer backed by RAM (`/dev/shm`). All filesystem changes are lost when the process exits — perfect for untrusted installers, DRM, or anti-cheat that modifies system files.
 
-## Installation
+## Installation (Linux)
 
-### One-liner (recommended)
+### From a clone (recommended)
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/Gaming-RF/APEX-WIN/main/install.sh | sudo bash
+git clone https://github.com/Gaming-RF/APEX-WIN.git
+cd APEX-WIN
+sudo ./scripts/install.sh
 ```
 
 This script:
-- Detects your distro (Ubuntu, Zorin, Fedora, Arch)
-- Installs all dependencies (Wine, GTK4, bubblewrap, winetricks, etc.)
-- Installs Rust if not present
-- Clones, builds, and installs everything
-- Registers the binfmt_misc handler so `.exe` files auto-launch
+- Checks for required tools (cargo, wine, bwrap) and refuses early if missing
+- Builds the workspace and the C components
+- Installs binaries, config, the systemd unit and the double-click MIME handler
+- Registers the binfmt_misc handler so bare `./app.exe` also works
+
+Requires root, because binfmt_misc registration and `/etc` writes need it.
 
 ### .deb package (Ubuntu/Zorin/Debian)
 
@@ -104,6 +173,43 @@ sudo make cargo-uninstall
 # or
 sudo win-sandbox-uninstall  # if installed via install.sh
 ```
+
+## Installation (macOS)
+
+Requires macOS 11+ (Intel or Apple Silicon), Rust, and a macOS Wine build.
+
+```bash
+brew install --cask wine-stable     # or any Wine for macOS
+git clone https://github.com/Gaming-RF/APEX-WIN.git
+cd APEX-WIN
+./scripts/install-macos.sh
+```
+
+Do **not** run it with `sudo`; the script refuses. It writes per-user files
+(`~/.config/win-sandbox`, `~/Library/LaunchAgents`) that must belong to you,
+and prompts for `sudo` only for the individual steps whose target directory
+isn't writable (typically `/usr/local/bin` and `/Applications`; Homebrew's
+`/opt/homebrew/bin` usually needs no elevation).
+
+It installs `win-sandbox-runner`, copies `APEX-WIN.app` to `/Applications`,
+registers it with Launch Services, and writes a launchd LaunchAgent.
+
+To run an `.exe`, right-click it in Finder and pick **Open With → APEX-WIN**,
+or set APEX-WIN as the default for `.exe` in Get Info. The app bundle is
+registered as an *alternate* handler, so it never silently takes over the
+file type on install.
+
+The background daemon is optional on macOS and **not needed for double-click**;
+it only pre-loads rules for repeated Terminal use:
+
+```bash
+launchctl load   ~/Library/LaunchAgents/com.apex-win.daemon.plist
+launchctl unload ~/Library/LaunchAgents/com.apex-win.daemon.plist
+```
+
+Not done yet on macOS: code signing / notarization (Gatekeeper will warn on a
+downloaded, non-locally-built bundle), an app icon, and universal binaries
+(`cargo build --release` produces only the host architecture).
 
 ## Quick Start
 
@@ -222,6 +328,9 @@ Set `download_mbps` / `upload_mbps` to your actual connection speed for optimal 
 
 Rules are stored in `config/rules.json` (system) or `~/.config/win-sandbox/rules.json` (user).
 
+Tier values are strings (`"tier0"`..`"tier3"`), not integers, and `hash` must be
+exactly 64 hex characters or the file is rejected at load time.
+
 ```json
 {
   "version": 1,
@@ -229,61 +338,52 @@ Rules are stored in `config/rules.json` (system) or `~/.config/win-sandbox/rules
     {
       "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "name": "notepad.exe",
-      "tier": 0,
+      "tier": "tier0",
       "network": false,
-      "gpu": false
+      "gpu": false,
+      "trusted": false
     }
   ],
   "defaults": {
-    "unmapped_tier": 0,
-    "untrusted_path_tier": 2,
+    "unmapped_tier": "tier0",
+    "untrusted_path_tier": "tier2",
     "network_default": false,
     "gpu_default": false
   }
 }
 ```
 
-## Installation
-
-### Prerequisites
+Check a rules file without running anything:
 
 ```bash
-# Ubuntu/Debian
+win-sandbox-runner --exe /path/to/app.exe --rules ./rules.json --dry-run
+```
+
+## Dependencies
+
+`scripts/install.sh` checks for the essential ones and stops early if any are
+missing, but installing them up front avoids a failed run.
+
+```bash
+# Ubuntu / Zorin / Debian
 sudo apt install wine bubblewrap libgtk-4-dev libadwaita-1-dev \
     gcc-mingw-w64-x86-64 clang libbpf-dev linux-headers-generic
 
-# Rust
+# Rust (any distro)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 rustup default stable
 ```
 
-### Build & Install
+`gcc-mingw-w64-x86-64`, `clang` and `libbpf-dev` are only needed for the
+optional C components (the Wine networking DLL and the eBPF DSCP filter). The
+install script skips those and warns if MinGW is absent, rather than failing.
+
+Optional services, if you want isolated networking for Tier 2/3:
 
 ```bash
-# Build
-cargo build --workspace --release
-make all
-
-# Install (requires root)
-sudo ./scripts/install.sh
+sudo systemctl start win-tap-bridge    # TAP bridge daemon
+sudo systemctl start win_tap_filter    # eBPF DSCP classifier
 ```
-
-### Post-Install
-
-```bash
-# Register binfmt handler
-sudo systemctl start win-sandbox-runner
-
-# (Optional) Start TAP bridge for network isolation
-sudo systemctl start win-tap-bridge
-
-# (Optional) Load eBPF DSCP filter
-sudo systemctl start win_tap_filter
-
-# Edit rules
-sudo nano /etc/win-sandbox-runner/rules.json
-```
-
 ## Project Structure
 
 ```
@@ -304,10 +404,19 @@ sudo nano /etc/win-sandbox-runner/rules.json
 │   ├── win-tap-bridge/          # TAP daemon (C, native Linux)
 │   ├── sys_netmp/               # Wine DLL (C, MinGW cross-compiled)
 │   └── win_tap_filter/          # eBPF TC classifier (C + clang)
+├── macos/                       # macOS-only assets
+│   ├── APEX-WIN.app/            # Launch Services handler (.exe double-click)
+│   └── com.apex-win.daemon.plist # launchd LaunchAgent (per-user)
 ├── scripts/
-│   └── install.sh               # Build & install script
+│   ├── install.sh               # Linux build & install
+│   ├── install-macos.sh         # macOS build & install
+│   ├── uninstall.sh
+│   ├── build-deb.sh             # .deb packaging
+│   ├── register-binfmt.sh       # Single source of truth for the binfmt line
+│   ├── setup-tap.sh
+│   ├── apex-win.desktop         # MIME handler — makes double-click work
+│   └── win-sandbox-runner.service
 ├── systemd/
-│   ├── win-sandbox-runner.service
 │   ├── win-tap-bridge.service
 │   └── win_tap_filter.service
 └── tests/
@@ -327,13 +436,25 @@ sudo nano /etc/win-sandbox-runner/rules.json
 - **Landlock**: Kernel-enforced filesystem restrictions (additive-only, no escalation)
 - **Bubblewrap**: Full namespace isolation (mount, PID, IPC, UTS)
 - **OverlayFS**: RAM-backed ephemeral filesystem (all changes lost on exit)
-- **Systemd hardening**: `ProtectSystem=strict`, `ProtectHome=yes`, `NoNewPrivileges=yes`, `AmbientCapabilities=CAP_NET_ADMIN`
+- **Isolation is the tiers' job, not the unit file's**: the systemd unit
+  deliberately does *not* set `ProtectHome`, `ProtectSystem` or
+  `NoNewPrivileges=yes`. systemd applies those to the whole cgroup, so they
+  also apply to the Wine process the daemon spawns, and `ProtectHome` breaks
+  Wine outright (`unable to create wineserver tmpdir`, because the per-app
+  prefix lives under `~/.local/share/win-sandbox`). Confining the *Windows
+  binary* is what Landlock/bubblewrap/OverlayFS do. See the comments in
+  `scripts/win-sandbox-runner.service` for the verification behind this.
 
 ### Known Limitations
 - Landlock cannot block all TCP connections (additive-only model)
 - TAP bridge requires `CAP_NET_ADMIN` on the bridge daemon
 - eBPF TC filter requires kernel 5.8+ with BTF
 - Tier 3 OverlayFS requires `CAP_SYS_ADMIN` for mount
+- Tier 3 needs bubblewrap >= 0.10 for unprivileged `--overlay`. On older
+  bubblewrap an *explicit* Tier 3 request is refused rather than quietly
+  served as Tier 2, since those are different guarantees
+- **macOS provides no isolation at all** (Tier 0 only); see
+  [Platform support](#platform-support)
 
 ## Development
 
@@ -351,13 +472,38 @@ cargo clippy --workspace -- -D warnings
 make all
 ```
 
+CI runs build/test/clippy/fmt on Linux and macOS, plus a skip-safe
+integration-script job. Note `--all-targets` on clippy: several real bugs in
+this project were only ever visible in test code.
+
+```bash
+# What CI runs (Linux)
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all --check
+
+# What CI runs (macOS) — by package, since win-sandbox-gui needs GTK4
+cargo test  -p win-sandbox-runner -p win-sandbox-common
+cargo clippy -p win-sandbox-runner -p win-sandbox-common --all-targets -- -D warnings
+
+# Cross-check the macOS build from a Linux box (catches cfg mistakes early)
+rustup target add x86_64-apple-darwin
+cargo clippy --target x86_64-apple-darwin -p win-sandbox-runner --all-targets -- -D warnings
+```
+
 ## Target Environment
 
+**Linux (primary)**
 - **OS**: Zorin OS 18.1 (Ubuntu 24.04 base)
 - **Kernel**: 7.0+ (Landlock, eBPF)
 - **Rust**: 1.75+
 - **GTK4**: 4.14 / libadwaita 1.5
-- **Wine**: 9.0+
+- **Wine**: 9.0+ (10.0 tested)
+- **bubblewrap**: 0.10+ for real Tier 3 (0.9 degrades, see Known Limitations)
+
+**macOS (CLI core only, no isolation)**
+- **OS**: macOS 11+ (Intel and Apple Silicon)
+- **Rust**: 1.75+
+- **Wine**: any macOS build on `PATH`
 
 ## License
 

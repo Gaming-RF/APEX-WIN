@@ -79,7 +79,7 @@ User runs ./game.exe (or a script does)
 | `crates/win-sandbox-runner/src/config.rs` | Config file discovery |
 | `crates/win-sandbox-runner/src/hasher.rs` | Binary hashing |
 | `scripts/win-sandbox-runner.service` | systemd unit file |
-| `scripts/apex-win.desktop` | MIME handler — makes double-click work |
+| `scripts/apex-win.desktop` | MIME handler — makes double-click work. Installed by BOTH `make quick-install` and `scripts/install.sh`. It was missing from `install.sh` until 2026-08-15, so anyone following the documented install route got a working daemon and a silently non-working double-click. |
 | `config/appdb.json` | Embedded app database |
 | `config/rules.json` | Sandbox rules |
 | `config/net-optimizer.json` | Network optimization config |

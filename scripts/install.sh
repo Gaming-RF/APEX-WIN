@@ -148,6 +148,35 @@ install_systemd() {
     systemctl daemon-reload 2>/dev/null || true
 }
 
+# Desktop MIME handler — this is what actually makes double-click work.
+#
+# Nautilus (and every other file manager) resolves a MIME handler and never
+# exec()s the .exe, so binfmt_misc alone does NOT cover the double-click path.
+# This was previously only done by `make quick-install`, which meant anyone
+# following the documented `sudo ./scripts/install.sh` route got a working
+# daemon and a non-working double-click, with nothing reporting a problem.
+install_desktop_handler() {
+    info "Installing double-click MIME handler..."
+    install -Dm644 scripts/apex-win.desktop \
+        "${DESTDIR:-}/usr/share/applications/apex-win.desktop"
+    update-desktop-database /usr/share/applications 2>/dev/null || true
+
+    # Register as default for every MIME type a PE binary may be detected as.
+    # xdg-mime writes PER-USER preferences, so it must run as the invoking
+    # user: under sudo it would set root's associations and leave the actual
+    # desktop session unchanged.
+    local mimes="application/vnd.microsoft.portable-executable \
+application/x-ms-dos-executable application/x-msdownload application/x-msi"
+    for m in $mimes; do
+        if [[ -n "${SUDO_USER:-}" ]]; then
+            sudo -u "$SUDO_USER" xdg-mime default apex-win.desktop "$m" 2>/dev/null || true
+        else
+            xdg-mime default apex-win.desktop "$m" 2>/dev/null || true
+        fi
+    done
+    info "Double-click handler registered for .exe files"
+}
+
 # --- Main ---
 
 main() {
@@ -167,6 +196,7 @@ main() {
     install_config
     install_binfmt
     install_systemd
+    install_desktop_handler
 
     echo ""
     info "Installation complete!"
