@@ -86,6 +86,66 @@ fn check_tier3_available(
     })
 }
 
+/// Check whether Tier 1/2/3 exist as sandboxing mechanisms *at all* on this
+/// platform, independent of whether a specific one (like Tier 3's overlay)
+/// is currently configured correctly. This is the platform-support gate;
+/// `check_tier3_available` is the finer-grained Linux capability gate that
+/// runs after this one passes.
+///
+/// Kept as its own function (not folded into `check_tier3_available`) so the
+/// existing, already-tested Tier 3 overlay logic is untouched: that check
+/// answers "is overlay isolation configured on this Linux host", this one
+/// answers "does Tier N exist on this OS at all".
+fn check_tier_implemented(
+    tier: Tier,
+    caps: &crate::capabilities::Capabilities,
+) -> Result<(), String> {
+    check_tier_implemented_for_os(tier, caps, cfg!(target_os = "linux"), std::env::consts::OS)
+}
+
+/// `check_tier_implemented`'s actual logic, with the "which OS is this"
+/// question taken as a parameter instead of read via `cfg!`/`env::consts`
+/// directly. Both branches need real, deterministic test coverage (this is
+/// the fail-secure gate that stands between an explicit `--tier 1/2/3`
+/// request and running unsandboxed on a platform that can't provide it) but
+/// a plain `cfg!(target_os = "linux")` bakes the answer in at compile time,
+/// so a unit test built on Linux could never exercise the non-Linux branch,
+/// and one built on macOS could never exercise the Linux branch. Splitting
+/// the OS lookup out as a parameter makes both reachable from any host.
+fn check_tier_implemented_for_os(
+    tier: Tier,
+    caps: &crate::capabilities::Capabilities,
+    is_linux: bool,
+    os_name: &str,
+) -> Result<(), String> {
+    if tier == Tier::Tier0 {
+        return Ok(()); // Tier 0 (direct Wine exec) has no OS-specific sandbox.
+    }
+    if is_linux {
+        return Ok(()); // Tier 1/2/3 all have Linux implementations.
+    }
+    // Non-Linux: tier1.rs/tier2.rs/tier3.rs are Linux-only modules and do
+    // not exist in this build at all, regardless of what capabilities.rs
+    // detects (Seatbelt availability does not currently back a real Tier
+    // 1/2 implementation — see HANDOFF.md for the macOS isolation gap).
+    Err(match tier {
+        Tier::Tier2 | Tier::Tier3 => format!(
+            "Tier {} needs Landlock/bubblewrap/OverlayFS, none of which exist on {os_name}",
+            tier.level()
+        ),
+        Tier::Tier1 => format!(
+            "Tier 1 needs Landlock, which does not exist on {os_name}{}",
+            if caps.seatbelt_available == Some(true) {
+                " (sandbox-exec is present, but APEX-WIN does not yet implement a Tier \
+                  1 sandbox using it — see HANDOFF.md)"
+            } else {
+                ""
+            }
+        ),
+        Tier::Tier0 => unreachable!("handled above"),
+    })
+}
+
 /// Execute the appropriate tier for the given binary.
 ///
 /// Full resolution flow:
@@ -168,13 +228,59 @@ pub fn execute(
     // --- Step 6: Resolve tier ---
     let (tier, tier_is_explicit) = resolve_tier(args, exe, rules, &explicit_entry, &matched_entry)?;
 
+    // One capability probe, reused by both gates below: the cross-platform
+    // "does Tier N exist here" check and the Linux-specific "is Tier 3's
+    // overlay actually configured" check.
+    let caps = crate::capabilities::Capabilities::detect();
+
+    // Cross-platform gate: does Tier N exist as a sandbox mechanism on this
+    // OS at all? On Linux this always passes (all four tiers are
+    // implemented) and falls through to the finer-grained Tier 3 overlay
+    // check below. On other platforms (currently: macOS build targets with
+    // no tier1/tier2/tier3 modules), only Tier 0 exists.
+    //
+    // Same fail-secure split as Tier 3's overlay check: an EXPLICIT request
+    // for a tier this OS cannot provide refuses, so a security decision the
+    // user actually made is never silently weakened. A HEURISTIC match
+    // (app-database/wizard/path defaults) degrades to Tier 0 with a loud
+    // warning instead — direct execution, no sandboxing at all — since that
+    // was never a promise the user made, and Tier 0 is strictly less
+    // isolated than any Tier 1/2/3 the heuristic intended, not a silent
+    // downgrade to a similar-but-weaker tier the way Tier3->Tier2 is.
+    let tier = if let Err(reason) = check_tier_implemented(tier, &caps) {
+        if tier_is_explicit {
+            if args.dry_run {
+                info!(
+                    "[DRY RUN] Tier {} was explicitly requested for {exe} but is not \
+                     available on this platform: {reason}. A real run would refuse.",
+                    tier.level()
+                );
+                return Ok(ExitCode::SUCCESS);
+            }
+            bail!(
+                "Refusing to run '{exe}': Tier {} was explicitly requested but is not \
+                 available on this platform ({reason}). Use --tier 0 to run without a \
+                 sandbox, or run this on Linux for real Tier 1/2/3 isolation.",
+                tier.level()
+            );
+        }
+        warn!(
+            "Tier {} was suggested by a heuristic but is not available on this platform \
+             ({reason}). Falling back to Tier 0 — direct execution, no sandboxing. This \
+             app is not isolated from the rest of your system.",
+            tier.level()
+        );
+        Tier::Tier0
+    } else {
+        tier
+    };
+
     // Fail secure: an explicit Tier 3 request must get real ephemeral-overlay
     // isolation or be refused, not silently served as Tier 2. Tier 2 and
     // Tier 3 have different threat models (persistent bwrap namespace vs.
     // OverlayFS changes discarded on exit); an app the user explicitly
     // pinned to Tier 3 may be relying on that guarantee.
     if tier == Tier::Tier3 && tier_is_explicit {
-        let caps = crate::capabilities::Capabilities::detect();
         if let Err(reason) = check_tier3_available(caps.tier3_available(), &caps.bwrap_version) {
             if args.dry_run {
                 info!(
@@ -223,9 +329,25 @@ pub fn execute(
 
     match tier {
         Tier::Tier0 => crate::tier0::run_with_env(args, &merged_env),
+        #[cfg(target_os = "linux")]
         Tier::Tier1 => crate::tier1::run(args),
+        #[cfg(target_os = "linux")]
         Tier::Tier2 => crate::tier2::run_with_network(args, network),
+        #[cfg(target_os = "linux")]
         Tier::Tier3 => crate::tier3::run_with_network(args, network),
+        // On non-Linux platforms, `check_tier_implemented` above already
+        // forced `tier` down to Tier0 (refusing outright for an explicit
+        // request, or downgrading a heuristic one with a warning) before
+        // execution ever reaches this match. Reaching Tier1/2/3 here would
+        // mean that gate has a bug, not that this is a legitimate case to
+        // silently handle — hence bail! rather than a silent no-op.
+        #[cfg(not(target_os = "linux"))]
+        Tier::Tier1 | Tier::Tier2 | Tier::Tier3 => bail!(
+            "internal error: reached Tier {} dispatch on a platform without a Tier 1/2/3 \
+             implementation; check_tier_implemented() should have refused or downgraded \
+             this before now",
+            tier.level()
+        ),
     }
 }
 
@@ -499,5 +621,105 @@ mod tests {
     fn tier3_unavailable_reports_missing_bwrap() {
         let err = check_tier3_available(false, &None).unwrap_err();
         assert!(err.contains("not found"));
+    }
+
+    // --- check_tier_implemented_for_os: the cross-platform tier-existence gate ---
+
+    fn no_caps() -> crate::capabilities::Capabilities {
+        crate::capabilities::Capabilities {
+            landlock_abi: None,
+            bwrap_version: None,
+            unprivileged_overlay: false,
+            seatbelt_available: None,
+        }
+    }
+
+    #[test]
+    fn tier0_always_implemented_regardless_of_os() {
+        let caps = no_caps();
+        assert!(check_tier_implemented_for_os(Tier::Tier0, &caps, true, "linux").is_ok());
+        assert!(check_tier_implemented_for_os(Tier::Tier0, &caps, false, "macos").is_ok());
+    }
+
+    #[test]
+    fn tier1_2_3_all_implemented_on_linux() {
+        let caps = no_caps();
+        for tier in [Tier::Tier1, Tier::Tier2, Tier::Tier3] {
+            assert!(
+                check_tier_implemented_for_os(tier, &caps, true, "linux").is_ok(),
+                "Tier {} must be implemented when is_linux=true",
+                tier.level()
+            );
+        }
+    }
+
+    #[test]
+    fn tier1_2_3_all_refused_on_non_linux() {
+        let caps = no_caps();
+        for tier in [Tier::Tier1, Tier::Tier2, Tier::Tier3] {
+            let err = check_tier_implemented_for_os(tier, &caps, false, "macos").unwrap_err();
+            assert!(
+                err.contains("macos"),
+                "refusal reason must name the actual OS so a user knows why: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn tier2_3_refusal_names_the_real_mechanisms() {
+        let caps = no_caps();
+        for tier in [Tier::Tier2, Tier::Tier3] {
+            let err = check_tier_implemented_for_os(tier, &caps, false, "macos").unwrap_err();
+            assert!(err.contains("Landlock"));
+            assert!(err.contains("bubblewrap"));
+            assert!(err.contains("OverlayFS"));
+        }
+    }
+
+    /// Tier 1's refusal message is the one place `check_tier_implemented`
+    /// reads `seatbelt_available` at all: when Seatbelt IS present, the
+    /// message must say so and explain why that doesn't help yet (no Tier 1
+    /// implementation built on it), rather than implying no isolation
+    /// mechanism exists on the host whatsoever.
+    #[test]
+    fn tier1_refusal_mentions_seatbelt_when_present() {
+        let mut caps = no_caps();
+        caps.seatbelt_available = Some(true);
+        let err = check_tier_implemented_for_os(Tier::Tier1, &caps, false, "macos").unwrap_err();
+        assert!(err.contains("sandbox-exec"));
+        assert!(err.contains("does not yet implement"));
+    }
+
+    #[test]
+    fn tier1_refusal_omits_seatbelt_mention_when_absent() {
+        let mut caps = no_caps();
+        caps.seatbelt_available = Some(false);
+        let err = check_tier_implemented_for_os(Tier::Tier1, &caps, false, "macos").unwrap_err();
+        assert!(!err.contains("sandbox-exec"));
+    }
+
+    #[test]
+    fn tier1_refusal_omits_seatbelt_mention_when_not_applicable() {
+        // seatbelt_available: None means "not macOS" (see the field's own
+        // doc comment) -- must not be conflated with Some(false) here.
+        let caps = no_caps();
+        let err = check_tier_implemented_for_os(Tier::Tier1, &caps, false, "windows").unwrap_err();
+        assert!(!err.contains("sandbox-exec"));
+    }
+
+    /// The public `check_tier_implemented` wrapper must actually forward to
+    /// `cfg!(target_os = "linux")`/`std::env::consts::OS`, not some other
+    /// hardcoded value -- this pins that wiring down. It can only assert
+    /// against whichever OS actually runs this test, which is why the
+    /// `_for_os` tests above exist to cover the branch this build isn't on.
+    #[test]
+    fn public_wrapper_reflects_actual_host_os() {
+        let caps = no_caps();
+        let result = check_tier_implemented(Tier::Tier1, &caps);
+        if cfg!(target_os = "linux") {
+            assert!(result.is_ok());
+        } else {
+            assert!(result.is_err());
+        }
     }
 }

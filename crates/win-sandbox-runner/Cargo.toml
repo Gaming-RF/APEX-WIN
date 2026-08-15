@@ -18,10 +18,19 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
-landlock.workspace = true
 libc.workspace = true
 tokio.workspace = true
 which.workspace = true
+
+# Linux-only: landlock is a Linux LSM with no macOS equivalent. The "mount"
+# feature of nix wraps mount(2)/umount(2), used by tier3's OverlayFS cleanup
+# (cleanup.rs) and unavailable on macOS (no mount(2) namespace semantics
+# there). Both are declared here, per-target, instead of in
+# workspace.dependencies, so `cargo build` on macOS never attempts to
+# resolve landlock at all.
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"
+nix = { workspace = true, features = ["mount"] }
 
 [dev-dependencies]
 tempfile = "3"

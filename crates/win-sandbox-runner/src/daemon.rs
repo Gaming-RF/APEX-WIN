@@ -89,27 +89,78 @@ impl DaemonState {
     }
 }
 
+/// Base directory for daemon runtime state (FIFO, IPC socket, PID file).
+///
+/// Linux: `/run` is the systemd/FHS convention — the unit file's
+/// `RuntimeDirectory=win-sandbox-runner` (see
+/// `scripts/win-sandbox-runner.service`) creates this exact path before
+/// `ExecStart` runs, so this string must stay in sync with that unit file.
+/// The Linux daemon runs as root (`run_daemon()` enforces this) because it
+/// needs to register a binfmt_misc handler in `/proc/sys/fs/binfmt_misc`,
+/// which requires root, and `/run` itself is root-owned.
+///
+/// macOS: there is no binfmt_misc, and therefore nothing that requires the
+/// daemon to run as root — see the platform split in `run_daemon()` below.
+/// It runs as a per-user `launchd` LaunchAgent instead (mirroring the
+/// architecture doc's Path A: the file's owner runs Wine directly, nothing
+/// executes as root). `/var/run` (root-owned, mode 0755) would therefore
+/// EACCES for a plain user process, so the runtime dir lives under the
+/// user's own `$TMPDIR` instead — the macOS analogue of Linux's
+/// `XDG_RUNTIME_DIR`, and already private per-user (mode 0700, set by the
+/// OS at login).
+#[cfg(target_os = "linux")]
+const RUNTIME_DIR_BASE: &str = "/run/win-sandbox-runner";
+
+/// Runtime directory base for macOS: `$TMPDIR/win-sandbox-runner`, falling
+/// back to `/tmp/win-sandbox-runner` if `$TMPDIR` is unset (should not
+/// happen under launchd, which always sets it, but a bare `cargo run`
+/// during development might not).
+#[cfg(not(target_os = "linux"))]
+fn runtime_dir_base() -> PathBuf {
+    let tmp = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
+    // TMPDIR on macOS is typically already-slash-terminated
+    // (e.g. "/var/folders/.../T/"); trim so join() doesn't produce "//".
+    PathBuf::from(tmp.trim_end_matches('/')).join("win-sandbox-runner")
+}
+
+#[cfg(target_os = "linux")]
+fn runtime_dir_base() -> PathBuf {
+    PathBuf::from(RUNTIME_DIR_BASE)
+}
+
 /// Paths used by the daemon.
-fn fifo_path() -> PathBuf {
-    PathBuf::from("/run/win-sandbox-runner/fifo")
+///
+/// `pub(crate)` (not private) so `main.rs`'s binfmt_misc detection path can
+/// call this instead of hardcoding a second copy of the FIFO path — this
+/// project has independently hit the same "same literal duplicated across
+/// files, one copy silently drifts" bug three times before (the binfmt mask
+/// constant), so a second literal path string here is worth avoiding on
+/// sight rather than waiting to hit it a fourth time.
+pub(crate) fn fifo_path() -> PathBuf {
+    runtime_dir_base().join("fifo")
 }
 
 fn socket_path() -> PathBuf {
-    PathBuf::from("/run/win-sandbox-runner/ipc.sock")
+    runtime_dir_base().join("ipc.sock")
 }
 
 fn pid_path() -> PathBuf {
-    PathBuf::from("/run/win-sandbox-runner/daemon.pid")
+    runtime_dir_base().join("daemon.pid")
 }
 
 /// Ensure the runtime directory exists with correct permissions.
 fn ensure_runtime_dir() -> Result<()> {
-    let dir = Path::new("/run/win-sandbox-runner");
+    let dir = runtime_dir_base();
     if !dir.exists() {
-        std::fs::create_dir_all(dir)
-            .context("Failed to create /run/win-sandbox-runner (are you root?)")?;
-        // Allow any user to write to the FIFO (for binfmt_misc)
-        std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o1777))?;
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("Failed to create {} (are you root?)", dir.display()))?;
+        // Allow any user to write to the FIFO (for binfmt_misc). Only
+        // meaningful on Linux, where the daemon is root and other UIDs need
+        // to reach the FIFO; on macOS the daemon already runs as the same
+        // user that will write to it, so world-writability isn't needed —
+        // but setting it anyway does no harm and keeps this one code path
+        // shared instead of adding a second cfg branch for a cosmetic mode.
+        std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o1777))?;
     }
     Ok(())
 }
@@ -295,7 +346,7 @@ fn build_status_json(
     caps: &crate::capabilities::Capabilities,
 ) -> String {
     format!(
-        r#"{{"launch_count":{},"app_profiles":{},"rules":{},"uptime":"running","landlock_abi":{},"bwrap_version":{},"tier3_available":{}}}"#,
+        r#"{{"launch_count":{},"app_profiles":{},"rules":{},"uptime":"running","landlock_abi":{},"bwrap_version":{},"tier3_available":{},"seatbelt_available":{},"tier1_2_available":{}}}"#,
         launch_count,
         app_profiles,
         rules_count,
@@ -307,6 +358,10 @@ fn build_status_json(
             .map(|v| format!("\"{v}\""))
             .unwrap_or_else(|| "null".to_string()),
         caps.unprivileged_overlay,
+        caps.seatbelt_available
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "null".to_string()),
+        caps.tier12_available(),
     )
 }
 
@@ -405,12 +460,23 @@ pub unsafe fn configure_child_uid(cmd: &mut std::process::Command, uid: u32) {
 pub fn run_daemon() -> Result<()> {
     info!("Starting APEX-WIN daemon...");
 
-    // Ensure we're running as root (needed for binfmt_misc and /run)
-    // SAFETY: geteuid() is always safe to call on Unix
-    if unsafe { libc::geteuid() } != 0 {
-        return Err(anyhow::anyhow!(
-            "Daemon must run as root (needed for binfmt_misc registration)"
-        ));
+    // Root is required on Linux only, and only because binfmt_misc
+    // registration (/proc/sys/fs/binfmt_misc/register) and the systemd
+    // RuntimeDirectory (/run/win-sandbox-runner) both require it. Neither
+    // applies on macOS: there is no binfmt_misc equivalent there (Path A —
+    // Launch Services invoking `--exe` directly — is the only launch path,
+    // and it already runs entirely as the invoking user; see the
+    // architecture note on `runtime_dir_base()`), so the macOS daemon is a
+    // per-user launchd LaunchAgent and must NOT require root — a LaunchAgent
+    // that immediately failed with "must run as root" would never start.
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: geteuid() is always safe to call on Unix
+        if unsafe { libc::geteuid() } != 0 {
+            return Err(anyhow::anyhow!(
+                "Daemon must run as root (needed for binfmt_misc registration)"
+            ));
+        }
     }
 
     // 1. Load state
@@ -697,10 +763,20 @@ mod tests {
         bwrap_version: Option<&str>,
         overlay: bool,
     ) -> crate::capabilities::Capabilities {
+        caps_with_seatbelt(landlock_abi, bwrap_version, overlay, None)
+    }
+
+    fn caps_with_seatbelt(
+        landlock_abi: Option<u8>,
+        bwrap_version: Option<&str>,
+        overlay: bool,
+        seatbelt: Option<bool>,
+    ) -> crate::capabilities::Capabilities {
         crate::capabilities::Capabilities {
             landlock_abi,
             bwrap_version: bwrap_version.map(String::from),
             unprivileged_overlay: overlay,
+            seatbelt_available: seatbelt,
         }
     }
 
@@ -742,24 +818,115 @@ mod tests {
         assert_eq!(parsed["tier3_available"], true);
     }
 
+    /// On Linux (`seatbelt_available: None`, since the field only applies to
+    /// macOS), `--status` must still report `null`, not silently omit the
+    /// key or coerce it to `false` — those are different facts (`false`
+    /// would mean "macOS host, sandbox-exec missing").
+    #[test]
+    fn status_json_seatbelt_null_on_non_macos() {
+        let json = build_status_json(0, 0, 0, &caps(None, None, false));
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed["seatbelt_available"].is_null());
+    }
+
+    #[test]
+    fn status_json_seatbelt_reports_macos_state() {
+        let with = caps_with_seatbelt(None, None, false, Some(true));
+        let without = caps_with_seatbelt(None, None, false, Some(false));
+
+        let parsed_with: serde_json::Value =
+            serde_json::from_str(&build_status_json(0, 0, 0, &with)).unwrap();
+        let parsed_without: serde_json::Value =
+            serde_json::from_str(&build_status_json(0, 0, 0, &without)).unwrap();
+
+        assert_eq!(parsed_with["seatbelt_available"], true);
+        assert_eq!(parsed_without["seatbelt_available"], false);
+    }
+
+    /// tier1_2_available must be true whenever ANY of the three underlying
+    /// mechanisms (Landlock, bubblewrap, Seatbelt) is present, and false
+    /// only when none are — this is the field a caller checks to answer
+    /// "is any filesystem-restriction sandbox usable here at all" without
+    /// having to know which OS it is running on.
+    #[test]
+    fn status_json_tier1_2_available_true_when_any_mechanism_present() {
+        let via_landlock = caps(Some(4), None, false);
+        let via_bwrap = caps(None, Some("0.9.0"), false);
+        let via_seatbelt = caps_with_seatbelt(None, None, false, Some(true));
+
+        for c in [via_landlock, via_bwrap, via_seatbelt] {
+            let parsed: serde_json::Value =
+                serde_json::from_str(&build_status_json(0, 0, 0, &c)).unwrap();
+            assert_eq!(
+                parsed["tier1_2_available"], true,
+                "expected tier1_2_available=true for {c:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn status_json_tier1_2_available_false_when_nothing_present() {
+        let nothing = caps_with_seatbelt(None, None, false, None);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&build_status_json(0, 0, 0, &nothing)).unwrap();
+        assert_eq!(parsed["tier1_2_available"], false);
+
+        // Explicitly-false Seatbelt (macOS, sandbox-exec missing) must not
+        // be confused with "not applicable" (None) — both correctly report
+        // tier1_2_available=false here, but for different underlying facts.
+        let macos_no_seatbelt = caps_with_seatbelt(None, None, false, Some(false));
+        let parsed2: serde_json::Value =
+            serde_json::from_str(&build_status_json(0, 0, 0, &macos_no_seatbelt)).unwrap();
+        assert_eq!(parsed2["tier1_2_available"], false);
+    }
+
     #[test]
     fn fifo_path_format() {
-        assert_eq!(fifo_path(), PathBuf::from("/run/win-sandbox-runner/fifo"));
+        assert_eq!(fifo_path(), runtime_dir_base().join("fifo"));
     }
 
     #[test]
     fn socket_path_format() {
-        assert_eq!(
-            socket_path(),
-            PathBuf::from("/run/win-sandbox-runner/ipc.sock")
-        );
+        assert_eq!(socket_path(), runtime_dir_base().join("ipc.sock"));
     }
 
     #[test]
     fn pid_path_format() {
-        assert_eq!(
-            pid_path(),
-            PathBuf::from("/run/win-sandbox-runner/daemon.pid")
+        assert_eq!(pid_path(), runtime_dir_base().join("daemon.pid"));
+    }
+
+    /// The Linux runtime dir must stay `/run/win-sandbox-runner` exactly —
+    /// it is load-bearing: `scripts/win-sandbox-runner.service`'s
+    /// `RuntimeDirectory=win-sandbox-runner` line creates precisely this
+    /// path before `ExecStart`, so if this constant ever drifted from that
+    /// unit file the daemon would silently fail to find its own runtime
+    /// directory. This is the platform-specific half of the path-format
+    /// tests above, which only check "does fifo_path() build on top of
+    /// runtime_dir_base() correctly" — not "is the Linux value itself right".
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn runtime_dir_base_matches_systemd_unit_file() {
+        assert_eq!(RUNTIME_DIR_BASE, "/run/win-sandbox-runner");
+    }
+
+    /// The macOS runtime dir must live under $TMPDIR (per-user, private,
+    /// mode 0700), never a shared/root-owned location — the daemon there
+    /// runs as an ordinary user (see `run_daemon()`'s platform split), so
+    /// anywhere shared between users would be both wrong (permission
+    /// errors) and a symlink-attack surface no `/run`-style tmpfs has.
+    #[test]
+    #[cfg(not(target_os = "linux"))]
+    fn runtime_dir_base_is_under_tmpdir_not_shared() {
+        let dir = runtime_dir_base();
+        assert!(
+            dir.ends_with("win-sandbox-runner"),
+            "expected .../win-sandbox-runner, got {}",
+            dir.display()
+        );
+        assert_ne!(
+            dir,
+            std::path::PathBuf::from("/var/run/win-sandbox-runner"),
+            "must not resolve to a root-owned shared path"
         );
     }
 

@@ -85,3 +85,36 @@ jobs:
             echo "--- $t ---"
             bash "$t" || exit 1
           done
+
+  # win-sandbox-runner's core (dispatch/rules/appdb/wizard/hasher/config/
+  # env_sanitize/tier0/netopt/nvidia/prefix) is portable and runs Tier 0
+  # (direct Wine, no OS sandbox) on macOS. Tier 1/2/3 (Landlock, bubblewrap,
+  # OverlayFS) are Linux-only and cfg-gated out entirely in main.rs — see the
+  # comment there. win-sandbox-gui is excluded: it hard-links GTK4/libadwaita,
+  # which have no macOS build story here, so this job builds by package
+  # (-p win-sandbox-runner -p win-sandbox-common), not --workspace.
+  check-macos:
+    name: build / test / lint (macOS, sandbox core only)
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt -p win-sandbox-runner -p win-sandbox-common --check
+
+      - name: Clippy
+        run: cargo clippy -p win-sandbox-runner -p win-sandbox-common --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test -p win-sandbox-runner -p win-sandbox-common --verbose
+
+      - name: Build release
+        run: cargo build --release -p win-sandbox-runner -p win-sandbox-common

@@ -1,8 +1,8 @@
 # APEX-WIN Handoff Document
 
-**Last updated**: 2026-08-13 — fixes for embedded configs, .deb, Wayland warning
+**Last updated**: 2026-08-15 — macOS port (CLI core only; Tier 0 is the only tier there so far)
 **Repository**: https://github.com/Gaming-RF/APEX-WIN
-**Branch**: main (HEAD at `237780d`)
+**Branch**: main (HEAD at `d1078e0` + uncommitted macOS-port changes; see "macOS Port" below)
 
 ---
 
@@ -10,7 +10,9 @@
 
 Transparent tiered sandbox for running Windows `.exe` files via Wine on Linux. Users double-click any `.exe` — the kernel intercepts it via binfmt_misc, a background daemon hashes the binary, looks up policies, and dispatches it through Wine with the right isolation tier. No terminal needed.
 
-**Target**: Zorin OS 18.1, kernel 7.0, Rust 1.96, Wine 10.0
+A macOS port of the CLI core (`win-sandbox-runner`) also exists — see "macOS Port" below. It reuses the same dispatch/rules/hashing logic but has no equivalent of Tier 1/2/3 yet; every `.exe` runs unsandboxed (Tier 0) there.
+
+**Target**: Zorin OS 18.1, kernel 7.0, Rust 1.96, Wine 10.0 (primary). macOS 11+ (Big Sur or later, both Intel and Apple Silicon) for the CLI-only port.
 
 ---
 
@@ -113,7 +115,7 @@ ENV:USER=user
 ```
 
 ### IPC Commands (via `win-sandbox-runner --status/--reload/--stop`)
-- `status` → JSON with launch_count, app_profiles, rules, uptime
+- `status` → JSON with launch_count, app_profiles, rules, uptime, landlock_abi, bwrap_version, tier3_available, seatbelt_available, tier1_2_available
 - `reload` → Reload rules and config from disk
 - `trust <path>` → Save app as trusted
 - `quit` → Graceful shutdown (unregisters binfmt, cleans up)
@@ -165,15 +167,17 @@ journalctl -u win-sandbox-runner -f
 ## Tests / CI
 
 ```bash
-cargo test --workspace                          # 95 tests
+cargo test --workspace                          # 141 tests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 ```
 
 CI runs all three on every push (`.github/workflows/ci.yml`), plus a
-skip-safe integration job. Adding it immediately caught that the workspace
-did not actually build: `nix` was missing the `user` feature, and stale
-release artifacts had been masking it.
+skip-safe integration job, plus a macOS job that builds/tests/lints
+`win-sandbox-runner`+`win-sandbox-common` only (see "macOS Port" below for
+why `win-sandbox-gui` is excluded there). Adding CI immediately caught that
+the workspace did not actually build: `nix` was missing the `user` feature,
+and stale release artifacts had been masking it.
 
 Note `--all-targets` on clippy: several real bugs here were only visible in
 test code.
@@ -210,6 +214,126 @@ test code.
 | 10 | binfmt registration failure was fatal (killed daemon) | Made non-fatal (warn instead of error) |
 | 11 | Config files not installed to `/etc/win-sandbox-runner/` | Makefile now copies appdb.json, rules.json, net-optimizer.json |
 | 12 | Wine couldn't create windows (no display env from daemon) | New FIFO protocol passes user's DISPLAY, XDG_RUNTIME_DIR, etc. |
+
+---
+
+## macOS Port
+
+CLI-only port of `win-sandbox-runner`. `win-sandbox-gui` is Linux-only (hard
+dependency on GTK4/libadwaita, no macOS build story) and is excluded from
+macOS builds by package selection (`-p win-sandbox-runner -p
+win-sandbox-common`, not `--workspace`) rather than by any Cargo
+platform-conditional membership, since Cargo workspaces don't support that.
+
+### What ported directly (no changes needed)
+
+`dispatch.rs`, `rules.rs`, `appdb.rs`, `wizard.rs`, `prefix.rs`, `hasher.rs`,
+`config.rs`, `env_sanitize.rs`, `tier0.rs`, `netopt.rs`, `nvidia.rs` have no
+hard Linux syscall dependencies. `netopt.rs` and `nvidia.rs` in particular
+were audited function-by-function: every OS-specific operation is already
+wrapped in `Result`/`Option` with graceful degradation to "feature
+unavailable" rather than a hard failure, so they needed zero code changes,
+only verification that this was actually true rather than assumed.
+
+### What's Linux-only and cfg-gated out entirely
+
+`tier1.rs` (Landlock), `tier2.rs` (bubblewrap), `tier3.rs` (OverlayFS+mount),
+and the modules that exist purely to serve them (`amd.rs`, `audio.rs`,
+`display.rs`, `net.rs`, `cleanup.rs`) are behind `#[cfg(target_os =
+"linux")]` module declarations in `main.rs`. They have zero non-Linux
+callers (verified by grep against every other module before gating). The
+`landlock` crate and `nix`'s `mount` feature are declared as
+Linux-only `[target.'cfg(target_os = "linux")'.dependencies]` in
+`crates/win-sandbox-runner/Cargo.toml`, not `workspace.dependencies`, so
+they don't even get fetched on other platforms — confirmed via `cargo check
+--target x86_64-apple-darwin`, where `landlock` doesn't compile at all and
+`nix` never pulls in the `mount` feature.
+
+**Consequence**: Tier 1/2/3 do not exist as a *mechanism* on macOS, not just
+as an unconfigured one. `dispatch.rs`'s `check_tier_implemented()` is the
+gate that enforces this at runtime: an explicit `--tier 1/2/3` request (or a
+hash pinned to one of those tiers in `rules.json`) refuses outright with a
+clear reason; a heuristic suggestion (app-database match, wizard guess)
+degrades to Tier 0 with a loud warning that the app is not isolated from the
+rest of the system. This mirrors the fail-secure-on-explicit-request /
+degrade-on-heuristic split already established for Tier 3 on Linux
+(`check_tier3_available`), kept as a separate function rather than merged
+into it so the already-tested Linux logic stays untouched.
+
+**Everything currently runs at Tier 0 on macOS.** No sandbox. This is
+deliberate honesty, not a placeholder bug: `capabilities.rs` detects
+`sandbox-exec` (Seatbelt) availability and reports it via `--status`
+(`seatbelt_available`, `tier1_2_available`), but nothing yet *uses*
+Seatbelt to actually confine a process — building a real Tier 1 on Seatbelt
+profiles is future work, not done here. Reporting Tier 1/2/3 as unavailable
+was the deliberate choice over faking weaker isolation as equivalent.
+
+### Runtime architecture differences
+
+The daemon (`daemon.rs`) runs as **root** on Linux because binfmt_misc
+registration (`/proc/sys/fs/binfmt_misc/register`) requires it, and the
+runtime dir (`/run/win-sandbox-runner`, matching the systemd unit's
+`RuntimeDirectory=`) is root-owned. Neither justification exists on macOS:
+there is no binfmt_misc equivalent, so `run_daemon()`'s root check is now
+`#[cfg(target_os = "linux")]`, and the runtime dir is
+`$TMPDIR/win-sandbox-runner` (a real per-user private tmp, not a
+root-owned shared path) via a new `runtime_dir_base()` function instead of
+the Linux-only `RUNTIME_DIR_BASE` const.
+
+**Path A (double-click) does NOT depend on the daemon at all, on either
+platform.** On macOS it's Launch Services resolving the
+`com.microsoft.windows-executable` UTI to `macos/APEX-WIN.app`
+(`Info.plist`'s `CFBundleDocumentTypes`), which forwards the opened file's
+path as `argv[1]` to a shell shim
+(`Contents/MacOS/apex-win-launcher`) that execs `win-sandbox-runner --exe
+"$1"`. Same shape as Linux's `apex-win.desktop`, just a different OS
+mechanism for the type association (UTI + app bundle vs. MIME type +
+`.desktop` file). Confirmed the argv-forwarding behavior is real (not
+assumed) via Apple's own `CFBundleExecutable` docs plus Platypus, a widely
+used tool built on exactly this: a non-Cocoa script as a bundle's
+executable receiving the opened file's path as a command-line argument.
+
+The daemon on macOS is a **per-user `launchd` LaunchAgent**
+(`macos/com.apex-win.daemon.plist`, `~/Library/LaunchAgents`), not a
+system-wide `LaunchDaemon`, and it exists only as an optional CLI
+convenience (pre-loaded rules/app-db for repeated `win-sandbox-runner
+some.exe` invocations from Terminal) — there is no macOS equivalent of
+binfmt_misc's kernel-level interception, so unlike Linux's Path B, nothing
+transparently routes a bare `./game.exe` through the daemon there.
+
+### New/changed files
+
+| File | Purpose |
+|------|---------|
+| `macos/APEX-WIN.app/Contents/Info.plist` | UTI document-type claim (`com.microsoft.windows-executable`), `LSUIElement=true` (no Dock icon) |
+| `macos/APEX-WIN.app/Contents/MacOS/apex-win-launcher` | Shell shim: forwards Launch Services' opened-file argv to `win-sandbox-runner --exe` |
+| `macos/com.apex-win.daemon.plist` | launchd LaunchAgent (per-user, not root); `@BINDIR@` placeholder substituted by the installer |
+| `scripts/install-macos.sh` | macOS installer: detects Homebrew prefix (Apple Silicon vs Intel differ), builds `-p win-sandbox-runner -p win-sandbox-common` only, installs the app bundle, registers it via `lsregister`, writes per-user config (no macOS equivalent of `/etc/win-sandbox-runner`, and none is needed — `config.rs`'s search paths already fall back to `None` gracefully when a path doesn't exist) |
+| `crates/win-sandbox-runner/src/capabilities.rs` | Added `seatbelt_available: Option<bool>` (macOS-only, `None` elsewhere — deliberately not `Some(false)`, so callers can distinguish "not applicable" from "checked and absent"), `tier12_available()` |
+| `crates/win-sandbox-runner/src/dispatch.rs` | Added `check_tier_implemented()`, thin wrapper around `check_tier_implemented_for_os()` (OS taken as a parameter instead of read via `cfg!`, so both the Linux and non-Linux branches are unit-testable on any single host OS — 9 new tests) |
+| `crates/win-sandbox-runner/src/daemon.rs` | Platform-gated root check in `run_daemon()`; `runtime_dir_base()` replaces the Linux-only `RUNTIME_DIR_BASE` const as the thing callers actually use; `fifo_path()` made `pub(crate)` so `main.rs` calls it instead of hardcoding a second copy of the literal (this project has hit the "same string duplicated, one copy drifts" bug three times before with the binfmt mask, so a second FIFO-path literal was fixed on sight rather than left as a fourth instance waiting to happen); `--status` JSON gained `seatbelt_available` and `tier1_2_available` fields |
+| `.github/workflows/ci.yml` | New `check-macos` job: `macos-latest` runner, builds/tests/lints `win-sandbox-runner`+`win-sandbox-common` by package (not `--workspace`, since `win-sandbox-gui` can't build there) |
+
+### What was NOT done (out of scope for this port)
+
+- No real Tier 1/2 implementation on Seatbelt profiles. `sandbox-exec`
+  detection exists purely for `--status` reporting today.
+- No macOS icon (`.icns`) for `APEX-WIN.app` — `Info.plist` deliberately
+  omits `CFBundleIconFile` rather than reference a file that doesn't exist;
+  Launch Services falls back to a generic bundle icon.
+- No code signing / notarization for `APEX-WIN.app`, which Gatekeeper will
+  likely require before a downloaded (not locally built) copy runs without
+  a manual override.
+- Universal binary vs. Apple-Silicon-only was left unresolved; `cargo build
+  --release` on a given machine only produces that machine's architecture.
+  A universal build needs an explicit `lipo`-based build step, not added
+  here.
+- No macOS execution was actually performed (this port was built and
+  cross-checked on Linux via `cargo check --target x86_64-apple-darwin`
+  and `cargo clippy --target x86_64-apple-darwin ... --all-targets -- -D
+  warnings`, both clean, plus reading through every changed code path). CI's
+  new `check-macos` job is the first point this actually runs on real
+  macOS hardware.
 
 ---
 

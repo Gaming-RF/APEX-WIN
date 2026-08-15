@@ -14,14 +14,29 @@ use tracing::debug;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Capabilities {
     /// Highest Landlock ABI enforced, if any (Tier 1 depends on this).
+    /// Linux-only: always `None` on other platforms, since Landlock is a
+    /// Linux LSM with no equivalent elsewhere.
     pub landlock_abi: Option<u8>,
     /// bubblewrap version string as reported by `bwrap --version`, if found.
+    /// Linux-only in practice: bubblewrap is not packaged for macOS.
     pub bwrap_version: Option<String>,
     /// Whether bubblewrap can create an unprivileged OverlayFS mount
     /// (`--overlay`, added in bubblewrap 0.10). Tier 3's ephemeral-overlay
     /// promise is only real when this is true; otherwise Tier 3 degrades to
     /// Tier 2 isolation, which is a materially weaker guarantee.
     pub unprivileged_overlay: bool,
+    /// macOS only: whether `sandbox-exec` (Seatbelt) is present on this
+    /// host. `None` on non-macOS platforms, where the field does not apply
+    /// — deliberately not defaulted to `Some(false)`, so a caller can tell
+    /// "not macOS" apart from "macOS but sandbox-exec missing".
+    ///
+    /// `sandbox-exec` is deprecated by Apple and its profile language is
+    /// undocumented for third-party use (see HANDOFF.md), so even when this
+    /// is `true` it is a best-effort filesystem restriction, not a Landlock-
+    /// or bubblewrap-equivalent security boundary. Tier 1/2 on macOS report
+    /// this honestly rather than claiming an isolation level they cannot
+    /// back up the way the Linux tiers can.
+    pub seatbelt_available: Option<bool>,
 }
 
 impl Capabilities {
@@ -33,6 +48,7 @@ impl Capabilities {
             landlock_abi: detect_landlock_abi_level(),
             bwrap_version: detect_bwrap_version(),
             unprivileged_overlay: detect_unprivileged_overlay(),
+            seatbelt_available: detect_seatbelt_available(),
         }
     }
 
@@ -41,8 +57,41 @@ impl Capabilities {
     pub fn tier3_available(&self) -> bool {
         self.unprivileged_overlay
     }
+
+    /// Whether Tier 1/2 (filesystem-restriction isolation) can be honored on
+    /// this host at all. On Linux this means Landlock or bubblewrap
+    /// respectively — callers should check `landlock_abi`/`bwrap_version`
+    /// directly for which. On macOS it means `sandbox-exec` is present; see
+    /// the caveat on [`Capabilities::seatbelt_available`] about what that
+    /// isolation is actually worth.
+    pub fn tier12_available(&self) -> bool {
+        self.landlock_abi.is_some()
+            || self.bwrap_version.is_some()
+            || self.seatbelt_available == Some(true)
+    }
 }
 
+/// macOS only: detect whether `sandbox-exec` is present. Always `None` on
+/// other platforms — see [`Capabilities::seatbelt_available`].
+#[cfg(target_os = "macos")]
+fn detect_seatbelt_available() -> Option<bool> {
+    Some(
+        Command::new("sandbox-exec")
+            .arg("-n")
+            .arg("no-network")
+            .arg("/usr/bin/true")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false),
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+fn detect_seatbelt_available() -> Option<bool> {
+    None
+}
+
+#[cfg(target_os = "linux")]
 fn detect_landlock_abi_level() -> Option<u8> {
     // Delegates to tier1's probe rather than reimplementing it. An earlier
     // version of this function called `Ruleset::create()` directly, on the
@@ -54,6 +103,12 @@ fn detect_landlock_abi_level() -> Option<u8> {
     crate::tier1::detect_landlock_abi()
         .ok()
         .map(|abi| abi as u8)
+}
+
+/// Landlock is a Linux LSM; there is nothing to probe on other platforms.
+#[cfg(not(target_os = "linux"))]
+fn detect_landlock_abi_level() -> Option<u8> {
+    None
 }
 
 fn detect_bwrap_version() -> Option<String> {

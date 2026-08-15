@@ -1,24 +1,45 @@
-mod amd;
 mod appdb;
-mod audio;
 mod capabilities;
-mod cleanup;
 mod config;
 mod daemon;
 mod dispatch;
-mod display;
 mod env_sanitize;
 mod hasher;
-mod net;
 mod netopt;
+// nvidia.rs is called unconditionally from dispatch.rs's cross-platform
+// execute() (the Tier2->Tier1 downgrade heuristic) and is portable by
+// construction: it only probes /proc/driver/nvidia and /dev/nvidia*, which
+// simply don't exist off Linux, so detect() degrades to None there with no
+// platform-specific code. Left ungated so dispatch.rs compiles everywhere.
 mod nvidia;
 mod prefix;
 mod rules;
 mod tier0;
-mod tier1;
-mod tier2;
-mod tier3;
 mod wizard;
+
+// The following modules exist solely to serve Tier 1/2/3 (Landlock,
+// bubblewrap, OverlayFS) — display/audio/GPU bind-mount detection, the TAP
+// network bridge, and OverlayFS cleanup hooks. They have no callers outside
+// tier1.rs/tier2.rs/tier3.rs (verified: `grep -rn "amd::\|audio::\|display::\|net::\|cleanup::"`
+// against every other module turns up nothing), so gating them here keeps
+// them from becoming dead code — and a `-D warnings` clippy build failure —
+// on non-Linux targets once tier1/2/3 themselves are gated out below.
+#[cfg(target_os = "linux")]
+mod amd;
+#[cfg(target_os = "linux")]
+mod audio;
+#[cfg(target_os = "linux")]
+mod cleanup;
+#[cfg(target_os = "linux")]
+mod display;
+#[cfg(target_os = "linux")]
+mod net;
+#[cfg(target_os = "linux")]
+mod tier1;
+#[cfg(target_os = "linux")]
+mod tier2;
+#[cfg(target_os = "linux")]
+mod tier3;
 
 use anyhow::Result;
 use clap::Parser;
@@ -157,7 +178,7 @@ fn main() -> ExitCode {
     if args.exe.is_none() && !args.args.is_empty() {
         let first = args.args[0].clone();
         if first.ends_with(".exe") || first.ends_with(".EXE") {
-            let fifo = std::path::PathBuf::from("/run/win-sandbox-runner/fifo");
+            let fifo = daemon::fifo_path();
             if fifo.exists() {
                 info!("binfmt: routing {first} through daemon FIFO");
                 if let Ok(mut f) = std::fs::OpenOptions::new().write(true).open(&fifo) {
