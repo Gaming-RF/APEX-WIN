@@ -1005,7 +1005,18 @@ mod tests {
     /// Without it, the two drift. The missing-\xff\xff-mask bug (kernel returns
     /// EINVAL) was found and fixed three separate times precisely because
     /// nothing compared the copies.
+    ///
+    /// Linux-only: this shells out to `sh scripts/register-binfmt.sh
+    /// --print`, whose `echo "$DEFINITION"` behavior is not portable. Caught
+    /// live on the CI macOS runner: `/bin/sh` there is bash running in POSIX
+    /// mode, whose `echo` DOES interpret `\xHH` escapes, while Linux's
+    /// `/bin/sh` (dash) does NOT -- so the same script prints literally
+    /// different bytes (`\x4d\x5a` vs. the raw bytes 0x4d 0x5a) depending on
+    /// which OS runs it. binfmt_misc itself only exists on Linux anyway, so
+    /// this test asserting Linux-specific shell behavior is correctly scoped
+    /// to Linux, not a bug to paper over with a portable echo elsewhere.
     #[test]
+    #[cfg(target_os = "linux")]
     fn binfmt_definition_matches_script() {
         let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../scripts/register-binfmt.sh");
