@@ -124,20 +124,43 @@ fn check_tier_implemented_for_os(
     if is_linux {
         return Ok(()); // Tier 1/2/3 all have Linux implementations.
     }
-    // Non-Linux: tier1.rs/tier2.rs/tier3.rs are Linux-only modules and do
-    // not exist in this build at all, regardless of what capabilities.rs
-    // detects (Seatbelt availability does not currently back a real Tier
-    // 1/2 implementation — see HANDOFF.md for the macOS isolation gap).
+    // Non-Linux, Tier 1/2: Seatbelt (sandbox-exec) can back these on macOS
+    // — see seatbelt.rs's module doc comment for exactly what guarantee
+    // that is (a real deny-by-default MAC boundary, but no mount/PID
+    // namespace or resource limits, so weaker than Landlock/bubblewrap on
+    // the axes Seatbelt doesn't cover). `caps.seatbelt_available` is only
+    // ever `Some(_)` on macOS (see its own doc comment on
+    // `Capabilities::seatbelt_available`), so checking it here is
+    // equivalent to "is this macOS with sandbox-exec present" without a
+    // separate is_macos parameter — one less thing that could disagree
+    // with what the field itself means.
+    if matches!(tier, Tier::Tier1 | Tier::Tier2) && caps.seatbelt_available == Some(true) {
+        return Ok(());
+    }
+    // Everything else: tier1.rs/tier2.rs/tier3.rs are Linux-only modules
+    // and do not exist in this build at all off Linux. Tier 3 in
+    // particular has no Seatbelt equivalent at all (no unprivileged
+    // ephemeral overlay mechanism on macOS), so it stays refused here
+    // regardless of Seatbelt availability.
     Err(match tier {
-        Tier::Tier2 | Tier::Tier3 => format!(
-            "Tier {} needs Landlock/bubblewrap/OverlayFS, none of which exist on {os_name}",
-            tier.level()
+        Tier::Tier3 => format!(
+            "Tier 3 needs an ephemeral OverlayFS mount, which has no macOS equivalent \
+             (no unprivileged union/overlay filesystem); OverlayFS itself is Linux-only, \
+             and no bubblewrap/mount(8) exist on {os_name} either way"
+        ),
+        Tier::Tier2 => format!(
+            "Tier 2 needs Landlock/bubblewrap or Seatbelt, none of which are available on \
+             {os_name}{}",
+            if caps.seatbelt_available == Some(false) {
+                " (sandbox-exec was checked and is not usable on this system)"
+            } else {
+                ""
+            }
         ),
         Tier::Tier1 => format!(
-            "Tier 1 needs Landlock, which does not exist on {os_name}{}",
-            if caps.seatbelt_available == Some(true) {
-                " (sandbox-exec is present, but APEX-WIN does not yet implement a Tier \
-                  1 sandbox using it — see HANDOFF.md)"
+            "Tier 1 needs Landlock or Seatbelt, none of which are available on {os_name}{}",
+            if caps.seatbelt_available == Some(false) {
+                " (sandbox-exec was checked and is not usable on this system)"
             } else {
                 ""
             }
@@ -192,7 +215,7 @@ pub fn execute(
 
     // --- Step 3: First-launch wizard for unknown apps ---
     if matched_entry.is_none() {
-        let result = wizard::run_wizard(exe, app_db, args.no_gui, hash);
+        let result = wizard::run_wizard(exe, app_db, args.no_gui, hash, args.uid.is_some());
         info!("First launch: {}", wizard::describe_decision(&result));
         matched_entry = Some(result.entry);
     }
@@ -335,18 +358,39 @@ pub fn execute(
         Tier::Tier2 => crate::tier2::run_with_network(args, network),
         #[cfg(target_os = "linux")]
         Tier::Tier3 => crate::tier3::run_with_network(args, network),
-        // On non-Linux platforms, `check_tier_implemented` above already
-        // forced `tier` down to Tier0 (refusing outright for an explicit
-        // request, or downgrading a heuristic one with a warning) before
-        // execution ever reaches this match. Reaching Tier1/2/3 here would
-        // mean that gate has a bug, not that this is a legitimate case to
-        // silently handle — hence bail! rather than a silent no-op.
-        #[cfg(not(target_os = "linux"))]
-        Tier::Tier1 | Tier::Tier2 | Tier::Tier3 => bail!(
-            "internal error: reached Tier {} dispatch on a platform without a Tier 1/2/3 \
+        // macOS: Seatbelt backs Tier 1/2 (see seatbelt.rs). Only reachable
+        // when check_tier_implemented_for_os already confirmed
+        // seatbelt_available == Some(true) for this exact tier, so no
+        // second capability check is needed here — same pattern as the
+        // Linux arms above, which don't re-check Landlock/bwrap either.
+        #[cfg(target_os = "macos")]
+        Tier::Tier1 => crate::seatbelt::run(args),
+        #[cfg(target_os = "macos")]
+        Tier::Tier2 => crate::seatbelt::run_with_network(args, network),
+        // Every platform this actually ships for is covered by an arm
+        // above. Reaching here means check_tier_implemented_for_os's gate
+        // has a bug (it admitted a tier this platform cannot back), not a
+        // legitimate case to silently handle — hence bail! rather than a
+        // silent no-op. Written as a catch-all match on `tier` (not
+        // per-variant #[cfg] arms) so it also covers any future platform
+        // this project targets without needing a matching new arm added
+        // here first.
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        _ => bail!(
+            "internal error: reached Tier {} dispatch on a platform with no tier \
              implementation; check_tier_implemented() should have refused or downgraded \
              this before now",
             tier.level()
+        ),
+        // On macOS specifically, Tier 3 has no Seatbelt-backed arm above
+        // (see check_tier_implemented_for_os: it is refused unconditionally
+        // off Linux), so it falls through to the same internal-error bail
+        // as an unsupported platform would.
+        #[cfg(target_os = "macos")]
+        Tier::Tier3 => bail!(
+            "internal error: reached Tier 3 dispatch on macOS, which has no Seatbelt-backed \
+             Tier 3 implementation; check_tier_implemented() should have refused this before \
+             now"
         ),
     }
 }
@@ -417,6 +461,8 @@ mod tests {
             reload: false,
             stop: false,
             unregister: false,
+            print_seatbelt_profile: false,
+            wine_prefix: None,
             user_env: std::collections::HashMap::new(),
             uid: None,
         }
@@ -653,8 +699,12 @@ mod tests {
         }
     }
 
+    /// With no capability info at all (no Landlock, no bwrap, no Seatbelt --
+    /// e.g. a platform this project has never run on), every non-Tier-0
+    /// tier must refuse. This is deliberately the baseline: the tests below
+    /// prove Tier 1/2 specifically become available once Seatbelt is.
     #[test]
-    fn tier1_2_3_all_refused_on_non_linux() {
+    fn tier1_2_3_all_refused_with_no_capabilities_at_all() {
         let caps = no_caps();
         for tier in [Tier::Tier1, Tier::Tier2, Tier::Tier3] {
             let err = check_tier_implemented_for_os(tier, &caps, false, "macos").unwrap_err();
@@ -665,46 +715,79 @@ mod tests {
         }
     }
 
+    /// Tier 3 has no Seatbelt (or any other macOS) backing at all -- unlike
+    /// Tier 1/2, no capability flag can ever flip this to Ok. Named
+    /// mechanisms in the message should match what the profile actually
+    /// needs, not a generic "not supported" so a reader understands why.
     #[test]
-    fn tier2_3_refusal_names_the_real_mechanisms() {
+    fn tier3_refusal_names_the_real_mechanisms() {
         let caps = no_caps();
-        for tier in [Tier::Tier2, Tier::Tier3] {
-            let err = check_tier_implemented_for_os(tier, &caps, false, "macos").unwrap_err();
-            assert!(err.contains("Landlock"));
-            assert!(err.contains("bubblewrap"));
-            assert!(err.contains("OverlayFS"));
+        let err = check_tier_implemented_for_os(Tier::Tier3, &caps, false, "macos").unwrap_err();
+        assert!(err.contains("OverlayFS"));
+    }
+
+    /// Same as above, but proves capability flags genuinely cannot unlock
+    /// Tier 3 the way they do for Tier 1/2 -- Seatbelt present must not
+    /// change the outcome.
+    #[test]
+    fn tier3_stays_refused_even_with_seatbelt_available() {
+        let mut caps = no_caps();
+        caps.seatbelt_available = Some(true);
+        assert!(check_tier_implemented_for_os(Tier::Tier3, &caps, false, "macos").is_err());
+    }
+
+    #[test]
+    fn tier2_refusal_names_the_real_mechanisms() {
+        let caps = no_caps();
+        let err = check_tier_implemented_for_os(Tier::Tier2, &caps, false, "macos").unwrap_err();
+        assert!(err.contains("Landlock"));
+        assert!(err.contains("bubblewrap"));
+        assert!(err.contains("Seatbelt"));
+    }
+
+    /// The actual point of this whole change: Seatbelt genuinely unlocks
+    /// Tier 1/2 on non-Linux, not just a mention in the refusal text.
+    #[test]
+    fn tier1_and_tier2_available_on_non_linux_when_seatbelt_present() {
+        let mut caps = no_caps();
+        caps.seatbelt_available = Some(true);
+        for tier in [Tier::Tier1, Tier::Tier2] {
+            assert!(
+                check_tier_implemented_for_os(tier, &caps, false, "macos").is_ok(),
+                "Tier {} must be available on macOS when Seatbelt is present",
+                tier.level()
+            );
         }
     }
 
-    /// Tier 1's refusal message is the one place `check_tier_implemented`
-    /// reads `seatbelt_available` at all: when Seatbelt IS present, the
-    /// message must say so and explain why that doesn't help yet (no Tier 1
-    /// implementation built on it), rather than implying no isolation
-    /// mechanism exists on the host whatsoever.
+    /// Seatbelt genuinely absent (checked and not usable, not just "not
+    /// macOS") must still refuse Tier 1/2 -- and the refusal should say so,
+    /// distinguishing "we checked, it's not there" from "this platform has
+    /// no capability field for it at all" (the None case below).
     #[test]
-    fn tier1_refusal_mentions_seatbelt_when_present() {
-        let mut caps = no_caps();
-        caps.seatbelt_available = Some(true);
-        let err = check_tier_implemented_for_os(Tier::Tier1, &caps, false, "macos").unwrap_err();
-        assert!(err.contains("sandbox-exec"));
-        assert!(err.contains("does not yet implement"));
-    }
-
-    #[test]
-    fn tier1_refusal_omits_seatbelt_mention_when_absent() {
+    fn tier1_and_tier2_refusal_mentions_seatbelt_checked_when_confirmed_absent() {
         let mut caps = no_caps();
         caps.seatbelt_available = Some(false);
-        let err = check_tier_implemented_for_os(Tier::Tier1, &caps, false, "macos").unwrap_err();
-        assert!(!err.contains("sandbox-exec"));
+        for tier in [Tier::Tier1, Tier::Tier2] {
+            let err = check_tier_implemented_for_os(tier, &caps, false, "macos").unwrap_err();
+            assert!(
+                err.contains("sandbox-exec was checked and is not usable"),
+                "Tier {} refusal should say Seatbelt was checked and found absent: {err}",
+                tier.level()
+            );
+        }
     }
 
+    /// `seatbelt_available: None` means "not applicable on this platform"
+    /// (see the field's own doc comment) -- distinct from `Some(false)`
+    /// ("checked, not usable"). The refusal wording must not conflate them.
     #[test]
-    fn tier1_refusal_omits_seatbelt_mention_when_not_applicable() {
-        // seatbelt_available: None means "not macOS" (see the field's own
-        // doc comment) -- must not be conflated with Some(false) here.
+    fn tier1_and_tier2_refusal_omits_seatbelt_mention_when_not_applicable() {
         let caps = no_caps();
-        let err = check_tier_implemented_for_os(Tier::Tier1, &caps, false, "windows").unwrap_err();
-        assert!(!err.contains("sandbox-exec"));
+        for tier in [Tier::Tier1, Tier::Tier2] {
+            let err = check_tier_implemented_for_os(tier, &caps, false, "windows").unwrap_err();
+            assert!(!err.contains("sandbox-exec"));
+        }
     }
 
     /// The public `check_tier_implemented` wrapper must actually forward to

@@ -747,13 +747,39 @@ fn handle_launch(req: &LaunchRequest, state: &Arc<Mutex<DaemonState>>) -> Result
     // Hash the binary
     let hash = hasher::hash_file(&req.exe_path)?;
 
-    // Build Args for the dispatch, passing user env and UID from FIFO message
-    let args = Args {
+    let args = args_for_launch_request(req);
+
+    // Lock state for dispatch (keeps app_db and rules consistent)
+    let state = state.lock().unwrap();
+
+    dispatch::execute(&args, &req.exe_path, &hash, &state.rules, &state.app_db)?;
+
+    Ok(())
+}
+
+/// Build the `Args` used to dispatch a FIFO-originated launch request.
+/// Extracted out of `handle_launch` so the fields that matter for
+/// correctness on this code path -- especially `no_gui` -- are pinned by a
+/// direct unit test instead of only being verifiable by reading the source.
+///
+/// `no_gui` is unconditionally `true`: this always runs on the daemon's
+/// background FIFO-reader thread, which has no controlling terminal to
+/// prompt on regardless of what `req.uid` contains (that field can
+/// legitimately be `None` if the FIFO writer sent a malformed or missing
+/// `UID:` line -- see `parse_launch_message` -- so it must not be relied on
+/// as the signal for "is this the daemon"). This was previously hardcoded
+/// to `false`, which was silently harmless only because `wizard.rs`'s
+/// interactive prompt was unimplemented; now that the prompt does
+/// something, leaving this `false` would hang every daemon-dispatched
+/// launch of an unknown `.exe` waiting on stdin input that can never
+/// arrive.
+fn args_for_launch_request(req: &LaunchRequest) -> Args {
+    Args {
         exe: Some(req.exe_path.clone()),
         tier: None,
         rules: None,
         verbose: false,
-        no_gui: false,
+        no_gui: true,
         dry_run: false,
         gamepad: false,
         nested_x11: false,
@@ -770,16 +796,11 @@ fn handle_launch(req: &LaunchRequest, state: &Arc<Mutex<DaemonState>>) -> Result
         reload: false,
         stop: false,
         unregister: false,
+        print_seatbelt_profile: false,
+        wine_prefix: None,
         user_env: req.env.clone(),
         uid: req.uid,
-    };
-
-    // Lock state for dispatch (keeps app_db and rules consistent)
-    let state = state.lock().unwrap();
-
-    dispatch::execute(&args, &req.exe_path, &hash, &state.rules, &state.app_db)?;
-
-    Ok(())
+    }
 }
 
 /// Query the daemon status via IPC socket.
@@ -831,6 +852,59 @@ pub fn send_command(cmd: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exact regression this project already made once: `no_gui` on a
+    /// FIFO-dispatched request was hardcoded `false`, which is only safe
+    /// because a background daemon thread has no controlling terminal. As
+    /// long as `wizard.rs`'s interactive prompt was unimplemented, `false`
+    /// here was silently harmless; it stopped being harmless the moment the
+    /// prompt did something. Pinned here as a real assertion instead of a
+    /// property only checkable by reading the source.
+    #[test]
+    fn launch_request_args_never_enable_gui_prompts() {
+        let req = LaunchRequest {
+            exe_path: "/home/alice/game.exe".to_string(),
+            uid: Some(1000),
+            env: HashMap::new(),
+        };
+        let args = args_for_launch_request(&req);
+        assert!(
+            args.no_gui,
+            "a FIFO-dispatched launch must never enable the interactive wizard prompt, \
+             which would hang the daemon's background thread waiting on stdin"
+        );
+    }
+
+    /// The specific edge case that makes `req.uid` unsafe as a proxy for
+    /// "this came from the daemon": it can genuinely be `None` (a malformed
+    /// or missing `UID:` line in the FIFO message -- see
+    /// `parse_launch_message`), yet this is still unambiguously a
+    /// daemon-dispatched request and must still never prompt.
+    #[test]
+    fn launch_request_args_never_enable_gui_prompts_even_with_missing_uid() {
+        let req = LaunchRequest {
+            exe_path: "/home/alice/game.exe".to_string(),
+            uid: None,
+            env: HashMap::new(),
+        };
+        let args = args_for_launch_request(&req);
+        assert!(args.no_gui);
+    }
+
+    #[test]
+    fn launch_request_args_forward_exe_path_uid_and_env() {
+        let mut env = HashMap::new();
+        env.insert("DISPLAY".to_string(), ":0".to_string());
+        let req = LaunchRequest {
+            exe_path: "/home/alice/game.exe".to_string(),
+            uid: Some(1000),
+            env: env.clone(),
+        };
+        let args = args_for_launch_request(&req);
+        assert_eq!(args.exe.as_deref(), Some("/home/alice/game.exe"));
+        assert_eq!(args.uid, Some(1000));
+        assert_eq!(args.user_env, env);
+    }
 
     fn caps(
         landlock_abi: Option<u8>,

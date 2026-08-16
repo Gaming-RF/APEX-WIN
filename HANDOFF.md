@@ -1,8 +1,8 @@
 # APEX-WIN Handoff Document
 
-**Last updated**: 2026-08-15 — macOS port (CLI core only; Tier 0 is the only tier there so far)
+**Last updated**: 2026-08-16 — Seatbelt-backed Tier 1/2 on macOS, interactive wizard prompt, opt-in Terminal shell hook
 **Repository**: https://github.com/Gaming-RF/APEX-WIN
-**Branch**: main (HEAD at `d1078e0` + uncommitted macOS-port changes; see "macOS Port" below)
+**Branch**: main (HEAD at `db17d62` + uncommitted Seatbelt/wizard/shell-hook changes; see "macOS Port" below)
 
 ---
 
@@ -10,7 +10,7 @@
 
 Transparent tiered sandbox for running Windows `.exe` files via Wine on Linux. Users double-click any `.exe` — the kernel intercepts it via binfmt_misc, a background daemon hashes the binary, looks up policies, and dispatches it through Wine with the right isolation tier. No terminal needed.
 
-A macOS port of the CLI core (`win-sandbox-runner`) also exists — see "macOS Port" below. It reuses the same dispatch/rules/hashing logic but has no equivalent of Tier 1/2/3 yet; every `.exe` runs unsandboxed (Tier 0) there.
+A macOS port of the CLI core (`win-sandbox-runner`) also exists — see "macOS Port" below. It reuses the same dispatch/rules/hashing logic. Tier 1/2 are backed by Apple's Seatbelt sandbox (real kernel-enforced isolation, weaker than Linux's Landlock/bubblewrap on some axes — see "Seatbelt-backed Tier 1/2"); Tier 3 has no macOS equivalent and is refused.
 
 **Target**: Zorin OS 18.1, kernel 7.0, Rust 1.96, Wine 10.0 (primary). macOS 11+ (Big Sur or later, both Intel and Apple Silicon) for the CLI-only port.
 
@@ -167,7 +167,7 @@ journalctl -u win-sandbox-runner -f
 ## Tests / CI
 
 ```bash
-cargo test --workspace                          # 141 tests
+cargo test --workspace                          # 152 tests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 ```
@@ -249,24 +249,77 @@ they don't even get fetched on other platforms — confirmed via `cargo check
 --target x86_64-apple-darwin`, where `landlock` doesn't compile at all and
 `nix` never pulls in the `mount` feature.
 
-**Consequence**: Tier 1/2/3 do not exist as a *mechanism* on macOS, not just
-as an unconfigured one. `dispatch.rs`'s `check_tier_implemented()` is the
-gate that enforces this at runtime: an explicit `--tier 1/2/3` request (or a
-hash pinned to one of those tiers in `rules.json`) refuses outright with a
-clear reason; a heuristic suggestion (app-database match, wizard guess)
-degrades to Tier 0 with a loud warning that the app is not isolated from the
-rest of the system. This mirrors the fail-secure-on-explicit-request /
-degrade-on-heuristic split already established for Tier 3 on Linux
+**Consequence**: Tier 3 does not exist as a *mechanism* on macOS at all (no
+unprivileged ephemeral overlay filesystem). `dispatch.rs`'s
+`check_tier_implemented()` is the gate that enforces this at runtime: an
+explicit `--tier 3` request (or a hash pinned to it in `rules.json`) refuses
+outright with a clear reason; a heuristic suggestion (app-database match,
+wizard guess) degrades to Tier 0 with a loud warning. This mirrors the
+fail-secure-on-explicit-request / degrade-on-heuristic split already
+established for Tier 3's overlay availability check on Linux
 (`check_tier3_available`), kept as a separate function rather than merged
 into it so the already-tested Linux logic stays untouched.
 
-**Everything currently runs at Tier 0 on macOS.** No sandbox. This is
-deliberate honesty, not a placeholder bug: `capabilities.rs` detects
-`sandbox-exec` (Seatbelt) availability and reports it via `--status`
-(`seatbelt_available`, `tier1_2_available`), but nothing yet *uses*
-Seatbelt to actually confine a process — building a real Tier 1 on Seatbelt
-profiles is future work, not done here. Reporting Tier 1/2/3 as unavailable
-was the deliberate choice over faking weaker isolation as equivalent.
+**Tier 1/2 DO exist on macOS**, backed by Apple's Seatbelt sandbox — see
+"Seatbelt-backed Tier 1/2" below. `check_tier_implemented_for_os()` admits
+them specifically when `caps.seatbelt_available == Some(true)`; when
+Seatbelt is confirmed absent (`Some(false)`) or the platform has no
+capability info at all (`None`), Tier 1/2 refuse the same way Tier 3 always
+does. `Capabilities::seatbelt_available` is only ever `Some(_)` on macOS
+(`None` elsewhere), so this check alone is equivalent to "is this macOS
+with sandbox-exec present" without a separate `is_macos` parameter.
+
+### Seatbelt-backed Tier 1/2
+
+`crates/win-sandbox-runner/src/seatbelt.rs` is the macOS analogue of
+`tier1.rs`/`tier2.rs`: `sandbox-exec` plus a generated SBPL (Sandbox
+Profile Language) `.sb` profile, `(deny default)` with a minimal allowlist,
+mirroring `tier1.rs`'s own Landlock ruleset shape (`file-read*` allowed
+broadly, matching Landlock Tier 1's read-only system-dir grants;
+`file-write*` scoped to the resolved Wine prefix and a per-launch scratch
+dir only; `process-exec`/`process-fork` so `wineserver` and its children,
+which inherit the parent's Seatbelt profile, can run). Tier 1 allows
+network (matching Landlock Tier 1's own documented inability to fully
+block it); Tier 2 denies it outright, which Seatbelt CAN do completely
+unlike Landlock — Tier 2 on macOS is therefore strictly more capable than
+Linux's own Tier 1 on the network axis, while lacking Tier 2's namespace
+isolation and GPU/audio/display passthrough plumbing.
+
+This is a real kernel-enforced MAC (mandatory access control) boundary,
+not a cosmetic wrapper — verified multiple ways rather than assumed:
+  - Fetched and read a current production Seatbelt profile
+    (`sandbox-macos-permissive-open.sb` from google-gemini/gemini-cli) to
+    confirm the exact SBPL syntax and the "children inherit the profile"
+    property this design depends on, before writing any of it.
+  - `seatbelt.rs`'s own unit tests assert the generated profile's shape
+    directly (deny-default present, write rule is subpath-scoped not
+    unconditional, devices are `literal` not `subpath` so a write to
+    `/dev/null` can't accidentally also match a hypothetical
+    `/dev/nullish-thing`, etc.) — run natively via a throwaway crate
+    extracted from `seatbelt.rs`'s pure functions, since this module only
+    compiles under `target_os = "macos"` and this session has no Mac.
+  - CI's `check-macos` job now runs a **hand-written** Seatbelt smoke test
+    first (a `(deny default)` profile asserting a write inside an allowed
+    dir succeeds and a write outside it fails) as a gate before anything
+    else in that job runs — if `sandbox-exec` doesn't actually enforce on
+    the runner, everything built on top of it is moot, so this is checked
+    before relying on it, not assumed.
+  - CI then runs a **generated-profile** enforcement test via a new
+    `--print-seatbelt-profile --tier 1/2 --wine-prefix <path>` CLI flag
+    (exists for this test, not for real dispatch — real dispatch never
+    needs to print a profile, only apply one): asserts a write inside the
+    printed Tier 1 profile's prefix succeeds, a write outside it fails, and
+    the Tier 2 profile additionally blocks a real outbound HTTPS
+    connection. This tests the *actual* profile-generation code path, not
+    a hand-copied approximation of it that could silently drift.
+
+`sandbox-exec` is deprecated by Apple with no public replacement for
+confining arbitrary third-party binaries (App Sandbox requires the binary
+itself opt in via entitlements, which a Windows `.exe` running under Wine
+cannot do). It remains in active production use for exactly this kind of
+untrusted-subprocess confinement by Chrome, OpenAI Codex, and Gemini CLI —
+checked before relying on it here, not assumed to still work despite the
+deprecation notice.
 
 ### Runtime architecture differences
 
@@ -322,14 +375,34 @@ transparently routes a bare `./game.exe` through the daemon there.
 | `macos/com.apex-win.daemon.plist` | launchd LaunchAgent (per-user, not root); `@BINDIR@` placeholder substituted by the installer |
 | `scripts/install-macos.sh` | macOS installer: detects Homebrew prefix (Apple Silicon vs Intel differ), builds `-p win-sandbox-runner -p win-sandbox-common` only, installs the app bundle, registers it via `lsregister`, writes per-user config (no macOS equivalent of `/etc/win-sandbox-runner`, and none is needed — `config.rs`'s search paths already fall back to `None` gracefully when a path doesn't exist). Privilege model is per-target, unlike Linux's `install.sh` which simply requires root throughout: this script **refuses to run under sudo** (it writes `~/.config` and `~/Library/LaunchAgents`, which must belong to the user, not root) and elevates only the specific steps whose target directory is not writable, tested with `-w` against the real filesystem rather than assumed (`/opt/homebrew/bin` is usually user-owned; `/usr/local/bin` and `/Applications` usually are not). `lsregister` is deliberately never elevated, since Launch Services registrations are per-user. |
 | `crates/win-sandbox-runner/src/capabilities.rs` | Added `seatbelt_available: Option<bool>` (macOS-only, `None` elsewhere — deliberately not `Some(false)`, so callers can distinguish "not applicable" from "checked and absent"), `tier12_available()` |
-| `crates/win-sandbox-runner/src/dispatch.rs` | Added `check_tier_implemented()`, thin wrapper around `check_tier_implemented_for_os()` (OS taken as a parameter instead of read via `cfg!`, so both the Linux and non-Linux branches are unit-testable on any single host OS — 9 new tests) |
-| `crates/win-sandbox-runner/src/daemon.rs` | Platform-gated root check in `run_daemon()`; `runtime_dir_base()` replaces the Linux-only `RUNTIME_DIR_BASE` const as the thing callers actually use; `fifo_path()` made `pub(crate)` so `main.rs` calls it instead of hardcoding a second copy of the literal (this project has hit the "same string duplicated, one copy drifts" bug three times before with the binfmt mask, so a second FIFO-path literal was fixed on sight rather than left as a fourth instance waiting to happen); `--status` JSON gained `seatbelt_available` and `tier1_2_available` fields |
-| `.github/workflows/ci.yml` | New `check-macos` job: `macos-latest` runner, builds/tests/lints `win-sandbox-runner`+`win-sandbox-common` by package (not `--workspace`, since `win-sandbox-gui` can't build there) |
+| `crates/win-sandbox-runner/src/seatbelt.rs` | New: macOS Tier 1/2 via `sandbox-exec` + generated SBPL profile. `build_profile()` is pure (tested directly, 9 tests); `run()`/`run_with_network()` wrap the profile-write + `sandbox-exec` exec, mirroring `tier1.rs`/`tier2.rs`'s shape |
+| `crates/win-sandbox-runner/src/dispatch.rs` | `check_tier_implemented_for_os()` now admits Tier 1/2 on non-Linux when `caps.seatbelt_available == Some(true)`; Tier 3 stays refused unconditionally off Linux (no capability flag can unlock it, unlike Tier 1/2 — pinned by `tier3_stays_refused_even_with_seatbelt_available`). The `execute()` match dispatches Tier 1/2 to `seatbelt::run`/`run_with_network` under `#[cfg(target_os = "macos")]`. 15 tests total on this gate (6 rewritten for the new semantics, 9 new) |
+| `crates/win-sandbox-runner/src/wizard.rs` | Implemented the interactive first-launch prompt that was previously a stub (`"Interactive wizard not yet implemented"` — true on Linux too, not just macOS; `win-sandbox-gui`'s IPC was never actually called from this binary on either platform). A real TTY prompt (stderr/stdin) behind a `Prompt` trait seam so both the "prompt asked and honored" and "prompt correctly skipped" paths are unit-testable. Gated on `!no_gui && !from_daemon`, where `from_daemon` must be `args.uid.is_some()` at the call site — see `daemon.rs` entry below for why that specific signal |
+| `crates/win-sandbox-runner/src/daemon.rs` | Platform-gated root check in `run_daemon()`; `runtime_dir_base()`/`runtime_dir_base_checked()` replace the Linux-only `RUNTIME_DIR_BASE` const; `fifo_path()` made `pub(crate)`. **Found and fixed a real pre-existing bug while wiring the new wizard prompt**: `handle_launch()` (extracted into `args_for_launch_request()`) hardcoded `no_gui: false` for every daemon-dispatched request, harmless only because the prompt was unimplemented — now that it does something, that would have hung the daemon's background FIFO thread on every unknown `.exe`. Fixed to `no_gui: true` unconditionally (not keyed off `req.uid`, which can legitimately be `None` for a malformed FIFO message and would have been an unsafe proxy). 3 pinning tests, mutation-tested. `--status` JSON gained `seatbelt_available` and `tier1_2_available` fields |
+| `crates/win-sandbox-runner/src/main.rs` | Added `--print-seatbelt-profile`/`--wine-prefix` (macOS-only; exists so CI can assert real enforcement against the exact profile text this binary generates, not a hand-copied approximation) |
+| `scripts/apex-win-shell-hook.sh` | New: opt-in zsh/bash hook catching `.exe` invocations typed in Terminal (`./game.exe` and bare `game.exe`). NOT built on `command_not_found_handler`/`command_not_found_handle` — verified directly (real MZ-header test files, both shells, with and without +x) that those hooks never fire for a slash-containing path at all (EACCES/126, a different failure class than "not found"/127 entirely). Uses zsh's `accept-line` ZLE widget override and bash's `DEBUG` trap (with `extdebug`, needed for a non-zero return to actually veto the command) instead, both verified end-to-end with a real pty (`script(1)`), including catching and fixing a zsh-specific bug along the way: unquoted `$var` does not word-split in zsh by default (unlike bash/POSIX sh), which silently collapsed a multi-arg command line into one argv element until fixed with `${=1}` |
+| `.github/workflows/ci.yml` | `check-macos` job gained two enforcement steps that run before anything else: a hand-written Seatbelt smoke test (proves `sandbox-exec` actually confines a process on the runner at all — the load-bearing check everything else depends on) and a generated-profile test using `--print-seatbelt-profile` (proves the real profile-generation code enforces its documented Tier 1/2 guarantees, not just that the profile *text* looks right) |
 
 ### What was NOT done (out of scope for this port)
 
-- No real Tier 1/2 implementation on Seatbelt profiles. `sandbox-exec`
-  detection exists purely for `--status` reporting today.
+- **Tier 3 on macOS.** No unprivileged ephemeral overlay filesystem exists;
+  refused rather than approximated (e.g. copy-prefix-to-temp-dir-and-discard
+  would be a real but much slower and more complex substitute, not
+  attempted here).
+- **Tier 2 networking on macOS.** Linux Tier 2 has an optional
+  `network=true` mode via the TAP bridge; macOS Tier 2 is filesystem
+  isolation + no network only — `seatbelt::run_with_network(args, true)`
+  fails loudly with a clear message rather than silently granting full
+  network access, which would make "Tier 2, network=true" mean something
+  weaker on macOS than the same combination means on Linux.
+- Seatbelt's own profile allowlist (sysctl-read names, mach-lookup service
+  names) was built by cross-referencing what a production profile
+  (Chrome's, via the Gemini CLI profile that was fetched and read) grants
+  for a comparable GUI-adjacent process, not by tracing every syscall Wine
+  itself makes on macOS. If a real Wine launch needs something not on that
+  list, Seatbelt will deny it and Wine will fail to start — the profile may
+  need iteration against a real Wine install, which this session doesn't
+  have.
 - No macOS icon (`.icns`) for `APEX-WIN.app` — `Info.plist` deliberately
   omits `CFBundleIconFile` rather than reference a file that doesn't exist;
   Launch Services falls back to a generic bundle icon.
@@ -340,12 +413,18 @@ transparently routes a bare `./game.exe` through the daemon there.
   --release` on a given machine only produces that machine's architecture.
   A universal build needs an explicit `lipo`-based build step, not added
   here.
-- No macOS execution was actually performed (this port was built and
-  cross-checked on Linux via `cargo check --target x86_64-apple-darwin`
-  and `cargo clippy --target x86_64-apple-darwin ... --all-targets -- -D
-  warnings`, both clean, plus reading through every changed code path). CI's
-  new `check-macos` job is the first point this actually runs on real
-  macOS hardware.
+- **A real Wine launch under Seatbelt was never performed** (this session
+  has no Mac and no macOS Wine install). What WAS verified on real macOS
+  CI hardware: `sandbox-exec` genuinely enforces a deny-default profile
+  (writes outside an allowlisted dir fail), and the *generated* Tier 1/2
+  profiles specifically enforce their documented guarantees (write scoped
+  to the Wine prefix, Tier 2 blocks a real outbound HTTPS connection) —
+  see the two new `check-macos` CI steps. What was NOT verified: that a
+  real Wine process can actually start and run under either profile
+  end-to-end, since that needs a real `.exe` and a real Wine install
+  neither this session nor the CI runner has. The `wineserver`/mach-lookup
+  allowlist entries are informed by production references, not tested
+  against real Wine.
 
 ---
 

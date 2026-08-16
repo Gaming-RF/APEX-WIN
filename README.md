@@ -73,38 +73,56 @@ the actual Wine process.
 |---|---|---|
 | Run `.exe` via Wine | yes | yes |
 | Double-click handler | yes (`apex-win.desktop`) | yes (`APEX-WIN.app`) |
-| Auto-intercept bare `./game.exe` | yes (`binfmt_misc`) | no (no OS equivalent) |
+| Auto-intercept bare `./game.exe`/`game.exe` in Terminal | yes (`binfmt_misc`, no opt-in) | opt-in shell hook (`apex-win-shell-hook.sh`) |
 | Tier 0 (no isolation) | yes | yes |
-| Tier 1 / 2 / 3 (real isolation) | yes | **no** |
+| Tier 1 (filesystem isolation) | yes (Landlock) | yes (Seatbelt) |
+| Tier 2 (isolation + no network) | yes (bubblewrap) | yes (Seatbelt) |
+| Tier 3 (ephemeral overlay) | yes | **no** |
 | Background daemon | systemd, runs as root | launchd LaunchAgent, per-user |
-| GUI (`win-sandbox-gui`) | yes | no (GTK4/libadwaita) |
+| GUI (`win-sandbox-gui`) | yes | no (GTK4/libadwaita); a TTY prompt covers the same first-launch decision on both platforms instead |
 
-**On macOS every `.exe` runs at Tier 0, with no sandbox isolation from the rest
-of your system.** Tiers 1-3 are built on Landlock, bubblewrap and OverlayFS,
-which are Linux kernel features with no macOS equivalent, so they are compiled
-out entirely rather than faked. Asking for one explicitly (`--tier 2`, or a
-rule pinning a hash to it) is **refused with an error**, not silently
-downgraded; a tier merely *suggested* by the app database falls back to Tier 0
-with a loud warning. macOS `sandbox-exec` (Seatbelt) is detected and reported
-by `--status`, but nothing is built on it yet, so it grants no protection today.
+**Tier 1/2 on macOS use Apple's Seatbelt sandbox (`sandbox-exec` + a
+generated `.sb` profile), not Landlock/bubblewrap.** It is a real
+kernel-enforced `(deny default)` boundary confirmed in CI to actually block
+writes outside the Wine prefix and (Tier 2 only) outbound network
+connections, not a cosmetic wrapper. It is *not* equivalent to
+Landlock/bubblewrap on every axis: no mount or PID namespace, no resource
+limits, same visible process table. `--status` reports which backend is in
+use. Tier 3 has no macOS equivalent (no unprivileged ephemeral overlay
+filesystem) and stays refused: an explicit `--tier 3` request errors rather
+than being silently served as something weaker; a heuristic suggestion
+degrades to Tier 0 with a loud warning instead. See
+`crates/win-sandbox-runner/src/seatbelt.rs` for the profile design and
+`--tier 0`/`1`/`2` for what's actually available.
+
+There is no macOS kernel equivalent of `binfmt_misc`: `execve()` there only
+understands Mach-O and `#!` scripts, with no user-registerable table for
+other formats, so a bare `./game.exe` typed in Terminal cannot be
+transparently intercepted the way it is on Linux without a kext (deprecated,
+blocked by default on Apple Silicon). `apex-win-shell-hook.sh` is the closest
+userspace substitute: an opt-in zsh/bash hook (source it from `~/.zshrc`)
+that catches `.exe` invocations before the shell tries to run them, verified
+directly against real interactive-shell sessions. It only affects the shell
+that sources it, not other programs or GUI launchers, and is not presented
+as equivalent to kernel-level interception.
 
 ## Tiers
 
 | Tier | Isolation | Filesystem | Network | Performance | Platform |
 |------|-----------|-----------|---------|-------------|----------|
 | 0 | None | Host | Host | Native | Linux, macOS |
-| 1 | Landlock | Read-only allowlist | Host (partial) | Native | Linux only |
-| 2 | Bubblewrap | Isolated tmpfs | TAP bridge | Near-native | Linux only |
+| 1 | Landlock (Linux) / Seatbelt (macOS) | Read-only allowlist | Host (partial) | Native | Linux, macOS |
+| 2 | Bubblewrap (Linux) / Seatbelt (macOS) | Isolated tmpfs (Linux) / prefix-scoped writes (macOS) | TAP bridge (Linux) / none (macOS) | Near-native | Linux, macOS |
 | 3 | OverlayFS | RAM ephemeral | TAP bridge | Near-native | Linux only |
 
 ### Tier 0 — Direct
 Runs Wine directly with a sanitized environment. All secrets, proxy configs, and sensitive variables are stripped. Suitable for trusted binaries.
 
-### Tier 1 — Landlock
-Uses Linux Landlock LSM to restrict filesystem access to an allowlisted set of paths. Network isolation is partial (Landlock cannot block all TCP — additive-only model). Recommended for moderately trusted software.
+### Tier 1 — Landlock (Linux) / Seatbelt (macOS)
+Linux: uses Landlock LSM to restrict filesystem access to an allowlisted set of paths. Network isolation is partial (Landlock cannot block all TCP — additive-only model). macOS: uses Seatbelt (`sandbox-exec`) with a generated `(deny default)` profile — filesystem writes are scoped to the Wine prefix, network is allowed (matching Linux Tier 1's own inability to fully block it). Recommended for moderately trusted software.
 
-### Tier 2 — Bubblewrap
-Full namespace isolation via `bwrap`. The binary runs in its own mount/PID/IPC namespace with:
+### Tier 2 — Bubblewrap (Linux) / Seatbelt, no network (macOS)
+Linux: full namespace isolation via `bwrap`. The binary runs in its own mount/PID/IPC namespace with:
 - tmpfs root, isolated /home and /tmp
 - Read-only system directories (/usr, /lib, /etc)
 - GPU passthrough (NVIDIA/AMD detection)
@@ -112,8 +130,10 @@ Full namespace isolation via `bwrap`. The binary runs in its own mount/PID/IPC n
 - Display forwarding (X11/Wayland)
 - TAP bridge networking (optional)
 
-### Tier 3 — OverlayFS Ephemeral
-Same as Tier 2 but with an OverlayFS layer backed by RAM (`/dev/shm`). All filesystem changes are lost when the process exits — perfect for untrusted installers, DRM, or anti-cheat that modifies system files.
+macOS: the same Seatbelt profile as Tier 1, but network is denied outright — Seatbelt can block this completely (unlike Landlock), so this axis is strictly more capable than Linux's own Tier 1. No mount/PID namespace or GPU/audio/display passthrough config the way Linux Tier 2 has (Wine talks to the host WindowServer directly); no TAP-bridge network mode yet, so Tier 2 on macOS is filesystem isolation + no network only.
+
+### Tier 3 — OverlayFS Ephemeral (Linux only)
+Same as Tier 2 but with an OverlayFS layer backed by RAM (`/dev/shm`). All filesystem changes are lost when the process exits — perfect for untrusted installers, DRM, or anti-cheat that modifies system files. No macOS equivalent (no unprivileged ephemeral overlay filesystem); refused there rather than silently downgraded.
 
 ## Installation (Linux)
 
@@ -453,7 +473,9 @@ sudo systemctl start win_tap_filter    # eBPF DSCP classifier
 - Tier 3 needs bubblewrap >= 0.10 for unprivileged `--overlay`. On older
   bubblewrap an *explicit* Tier 3 request is refused rather than quietly
   served as Tier 2, since those are different guarantees
-- **macOS provides no isolation at all** (Tier 0 only); see
+- **macOS has no Tier 3** (no unprivileged ephemeral overlay filesystem); Tier
+  1/2 use Seatbelt, weaker than Landlock/bubblewrap on axes it doesn't cover
+  (no mount/PID namespace, no resource limits) — see
   [Platform support](#platform-support)
 
 ## Development
@@ -500,7 +522,7 @@ cargo clippy --target x86_64-apple-darwin -p win-sandbox-runner --all-targets --
 - **Wine**: 9.0+ (10.0 tested)
 - **bubblewrap**: 0.10+ for real Tier 3 (0.9 degrades, see Known Limitations)
 
-**macOS (CLI core only, no isolation)**
+**macOS (CLI core only, Tier 1/2 via Seatbelt, no Tier 3)**
 - **OS**: macOS 11+ (Intel and Apple Silicon)
 - **Rust**: 1.75+
 - **Wine**: any macOS build on `PATH`

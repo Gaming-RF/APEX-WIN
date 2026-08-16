@@ -41,6 +41,13 @@ mod tier2;
 #[cfg(target_os = "linux")]
 mod tier3;
 
+// macOS analogue of tier1.rs/tier2.rs: filesystem (and, for Tier 2,
+// network) isolation via Seatbelt (sandbox-exec). See seatbelt.rs's module
+// doc comment for what it does and does not provide relative to Landlock
+// and bubblewrap.
+#[cfg(target_os = "macos")]
+mod seatbelt;
+
 use anyhow::Result;
 use clap::Parser;
 use std::process::ExitCode;
@@ -139,6 +146,20 @@ struct Args {
     /// Unregister the binfmt_misc handler (cleanup before uninstall).
     #[arg(long)]
     unregister: bool,
+
+    /// macOS only: print the generated Seatbelt (.sb) profile for --tier
+    /// and --wine-prefix to stdout instead of running anything. Exists so
+    /// CI can assert real sandbox-exec enforcement against the exact
+    /// profile text this binary generates, not a hand-copied approximation
+    /// of it that could silently drift from what actually runs.
+    #[arg(long)]
+    print_seatbelt_profile: bool,
+
+    /// Wine prefix to use when generating a profile with
+    /// --print-seatbelt-profile. Not used outside that flag: real launches
+    /// resolve the prefix through PrefixManager, same as every other tier.
+    #[arg(long)]
+    wine_prefix: Option<String>,
 
     /// User environment variables (set by daemon, not CLI).
     #[arg(skip)]
@@ -273,6 +294,39 @@ fn run(args: &Args) -> Result<ExitCode> {
     if args.unregister {
         daemon::unregister_binfmt()?;
         return Ok(ExitCode::SUCCESS);
+    }
+
+    // --print-seatbelt-profile: macOS only. See the flag's own doc comment.
+    if args.print_seatbelt_profile {
+        #[cfg(target_os = "macos")]
+        {
+            let prefix = args
+                .wine_prefix
+                .as_deref()
+                .unwrap_or("/tmp/apex-win-test-prefix");
+            let tmp = std::env::temp_dir();
+            let tmp_str = tmp.to_string_lossy();
+            let network = match args.tier.as_deref() {
+                Some("1") => true,
+                Some("2") => false,
+                other => {
+                    tracing::error!(
+                        "--print-seatbelt-profile requires --tier 1 or --tier 2, got {other:?}"
+                    );
+                    return Ok(ExitCode::FAILURE);
+                }
+            };
+            println!(
+                "{}",
+                seatbelt::build_profile(prefix, &tmp_str, None, network)
+            );
+            return Ok(ExitCode::SUCCESS);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            tracing::error!("--print-seatbelt-profile is macOS only");
+            return Ok(ExitCode::FAILURE);
+        }
     }
 
     // --cleanup-net: remove network optimizations and exit

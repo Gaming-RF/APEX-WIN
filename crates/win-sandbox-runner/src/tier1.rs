@@ -222,6 +222,8 @@ mod tests {
             reload: false,
             stop: false,
             unregister: false,
+            print_seatbelt_profile: false,
+            wine_prefix: None,
             user_env: std::collections::HashMap::new(),
             uid: None,
         };
@@ -256,6 +258,8 @@ mod tests {
             reload: false,
             stop: false,
             unregister: false,
+            print_seatbelt_profile: false,
+            wine_prefix: None,
             user_env: std::collections::HashMap::new(),
             uid: None,
         };
